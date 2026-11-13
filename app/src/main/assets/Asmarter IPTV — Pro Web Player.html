@@ -1,0 +1,2269 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asmarter IPTV — Pro Web Player</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+          colors: {
+            brand: {
+              50: '#eef7ff',
+              400: '#38bdf8',
+              500: '#0ea5e9',
+              600: '#0284c7',
+              900: '#0c4a6e'
+            },
+            surface: {
+              950: '#070b14',
+              900: '#0d1424',
+              850: '#111a2e',
+              800: '#16223b',
+              700: '#1f3052'
+            }
+          }
+        }
+      }
+    };
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background-color: #070b14;
+      color: #f1f5f9;
+      margin: 0;
+      overflow-x: hidden;
+    }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1424; }
+    ::-webkit-scrollbar-thumb { background: #1f3052; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #38bdf8; }
+    .glass-card {
+      background: linear-gradient(145deg, rgba(22, 34, 59, 0.92), rgba(13, 20, 36, 0.96));
+      border: 1px solid rgba(56, 189, 248, 0.14);
+      backdrop-filter: blur(12px);
+    }
+    .tile-live { background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 55%, #1e3a8a 100%); }
+    .tile-movies { background: linear-gradient(135deg, #f97316 0%, #dc2626 60%, #7f1d1d 100%); }
+    .tile-series { background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 60%, #3b0764 100%); }
+    .tile-hover { transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease; }
+    .tile-hover:hover { transform: translateY(-3px); box-shadow: 0 14px 32px -10px rgba(14, 165, 233, 0.35); }
+    .line-clamp-1 { display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  </style>
+</head>
+<body class="min-h-screen bg-surface-950 text-slate-100 antialiased selection:bg-brand-500/30 selection:text-white">
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-sm pointer-events-none"></div>
+
+  <!-- App Root -->
+  <div id="app" class="min-h-screen flex flex-col"></div>
+
+  <!-- Modal Root -->
+  <div id="modal-root" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/75 backdrop-blur-sm p-4"></div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // =========================================================
+      // SAFE STORAGE HELPERS
+      // =========================================================
+      const STORAGE_KEY = 'asmarter_iptv_state_v1';
+      function loadSavedState() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          return raw ? JSON.parse(raw) : null;
+        } catch (e) {
+          return null;
+        }
+      }
+      function persistState() {
+        try {
+          const toSave = {
+            profiles: state.profiles,
+            activeProfileId: state.activeProfileId,
+            favorites: state.favorites,
+            history: state.history,
+            watchedVod: state.watchedVod,
+            settings: state.settings,
+            lockedCategories: state.lockedCategories
+          };
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+        } catch (e) {
+          // Ignore storage quota / sandbox restriction
+        }
+      }
+
+      // =========================================================
+      // DEMO DATASET (WITH REAL PUBLIC CORS-ENABLED HLS STREAMS)
+      // =========================================================
+      const PUBLIC_STREAMS = {
+        mux: 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8',
+        sintel: 'https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8',
+        bipbop: 'https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8'
+      };
+
+      function buildDemoCatalog() {
+        const now = Date.now();
+        const min = 60 * 1000;
+        const epgTemplate = (chName) => [
+          { title: `${chName} Morning Briefing`, start: now - 90 * min, end: now - 30 * min, desc: 'Catch-up archived broadcast with full highlights.' },
+          { title: `${chName} Live Desk`, start: now - 30 * min, end: now + 30 * min, desc: 'Live coverage, analysis, and special segments.' },
+          { title: `${chName} Prime Feature`, start: now + 30 * min, end: now + 90 * min, desc: 'Featured evening programming in HD.' },
+          { title: `${chName} Late Edition`, start: now + 90 * min, end: now + 150 * min, desc: 'Overnight wrap-up and scheduled replay.' }
+        ];
+
+        const liveCategories = [
+          { id: 'cat_sports', name: 'Sports HD' },
+          { id: 'cat_news', name: 'World News' },
+          { id: 'cat_ent', name: 'Entertainment' },
+          { id: 'cat_movies_live', name: 'Cinema Channels' },
+          { id: 'cat_kids', name: 'Kids & Family' },
+          { id: 'cat_doc', name: 'Documentary' }
+        ];
+
+        const liveChannels = [
+          { id: 'ch_101', num: 101, name: 'Arena Sports 1 HD', categoryId: 'cat_sports', url: PUBLIC_STREAMS.mux, catchup: true, color: '#0ea5e9', badge: 'FHD', epg: epgTemplate('Arena Sports 1') },
+          { id: 'ch_102', num: 102, name: 'Premier Football Plus', categoryId: 'cat_sports', url: PUBLIC_STREAMS.sintel, catchup: true, color: '#2563eb', badge: '4K', epg: epgTemplate('Premier Football') },
+          { id: 'ch_103', num: 103, name: 'Motorsport Live TV', categoryId: 'cat_sports', url: PUBLIC_STREAMS.bipbop, catchup: false, color: '#0284c7', badge: 'HD', epg: epgTemplate('Motorsport Live') },
+          { id: 'ch_201', num: 201, name: 'Global News 24/7', categoryId: 'cat_news', url: PUBLIC_STREAMS.bipbop, catchup: true, color: '#ef4444', badge: 'HD', epg: epgTemplate('Global News') },
+          { id: 'ch_202', num: 202, name: 'Business & Markets TV', categoryId: 'cat_news', url: PUBLIC_STREAMS.mux, catchup: true, color: '#f97316', badge: 'FHD', epg: epgTemplate('Business TV') },
+          { id: 'ch_301', num: 301, name: 'Prime Entertainment', categoryId: 'cat_ent', url: PUBLIC_STREAMS.sintel, catchup: true, color: '#8b5cf6', badge: 'FHD', epg: epgTemplate('Prime Ent') },
+          { id: 'ch_302', num: 302, name: 'Comedy Centrality', categoryId: 'cat_ent', url: PUBLIC_STREAMS.mux, catchup: false, color: '#a855f7', badge: 'HD', epg: epgTemplate('Comedy') },
+          { id: 'ch_401', num: 401, name: 'CineMax Action', categoryId: 'cat_movies_live', url: PUBLIC_STREAMS.sintel, catchup: true, color: '#dc2626', badge: '4K', epg: epgTemplate('CineMax Action') },
+          { id: 'ch_402', num: 402, name: 'Indie Film Vault', categoryId: 'cat_movies_live', url: PUBLIC_STREAMS.bipbop, catchup: false, color: '#e11d48', badge: 'HD', epg: epgTemplate('Indie Vault') },
+          { id: 'ch_501', num: 501, name: 'ToonBox Family', categoryId: 'cat_kids', url: PUBLIC_STREAMS.mux, catchup: true, color: '#10b981', badge: 'HD', epg: epgTemplate('ToonBox') },
+          { id: 'ch_601', num: 601, name: 'Nature & Cosmos HD', categoryId: 'cat_doc', url: PUBLIC_STREAMS.sintel, catchup: true, color: '#14b8a6', badge: '4K', epg: epgTemplate('Nature & Cosmos') }
+        ];
+
+        const vodCategories = [
+          { id: 'vod_action', name: 'Action & Sci-Fi' },
+          { id: 'vod_anim', name: 'Animation' },
+          { id: 'vod_drama', name: 'Drama & Thriller' },
+          { id: 'vod_doc', name: 'Documentaries' }
+        ];
+
+        const movies = [
+          {
+            id: 'mov_1',
+            title: 'Sintel: The Dragon Quest',
+            year: 2010,
+            rating: '8.4',
+            duration: '15m',
+            categoryId: 'vod_anim',
+            genre: 'Animation, Fantasy',
+            director: 'Colin Levy',
+            cast: 'Halina Reijn, Thom Hoffman',
+            plot: 'A lonely wanderer named Sintel searches across dangerous lands to rescue a baby dragon she befriended.',
+            url: PUBLIC_STREAMS.sintel,
+            gradient: 'from-amber-600 via-rose-700 to-slate-900'
+          },
+          {
+            id: 'mov_2',
+            title: 'Big Buck Bunny',
+            year: 2008,
+            rating: '8.1',
+            duration: '10m',
+            categoryId: 'vod_anim',
+            genre: 'Animation, Comedy',
+            director: 'Sacha Goedegebure',
+            cast: 'Blender Open Movie Cast',
+            plot: 'A gentle giant rabbit faces off against three mischievous forest rodents in a hilarious woodland showdown.',
+            url: PUBLIC_STREAMS.mux,
+            gradient: 'from-emerald-600 via-teal-700 to-slate-900'
+          },
+          {
+            id: 'mov_3',
+            title: 'Orbital Horizon',
+            year: 2025,
+            rating: '8.7',
+            duration: '2h 08m',
+            categoryId: 'vod_action',
+            genre: 'Sci-Fi, Action',
+            director: 'M. Vance',
+            cast: 'Elena Rostova, Devon Brooks',
+            plot: 'When a deep-space relay goes dark, a salvage crew races against solar storms to recover the black box.',
+            url: PUBLIC_STREAMS.mux,
+            gradient: 'from-sky-600 via-indigo-800 to-slate-950'
+          },
+          {
+            id: 'mov_4',
+            title: 'Midnight Meridian',
+            year: 2024,
+            rating: '7.9',
+            duration: '1h 54m',
+            categoryId: 'vod_drama',
+            genre: 'Thriller, Mystery',
+            director: 'S. Takahashi',
+            cast: 'Kenji Sato, Mara Lindqvist',
+            plot: 'An air traffic controller uncovers a coded transponder signal during a trans-Pacific red-eye flight.',
+            url: PUBLIC_STREAMS.bipbop,
+            gradient: 'from-violet-700 via-purple-900 to-slate-950'
+          },
+          {
+            id: 'mov_5',
+            title: 'Deep Ocean Frontiers',
+            year: 2025,
+            rating: '8.9',
+            duration: '1h 32m',
+            categoryId: 'vod_doc',
+            genre: 'Documentary, Science',
+            director: 'Dr. Clara Moreno',
+            cast: 'Narrated by David Sterling',
+            plot: 'Submersible expeditions reveal bioluminescent ecosystems thriving miles beneath the Pacific trench.',
+            url: PUBLIC_STREAMS.sintel,
+            gradient: 'from-cyan-600 via-blue-900 to-slate-950'
+          },
+          {
+            id: 'mov_6',
+            title: 'Velocity Zero',
+            year: 2026,
+            rating: '8.2',
+            duration: '2h 01m',
+            categoryId: 'vod_action',
+            genre: 'Action, Adventure',
+            director: 'R. Alvarez',
+            cast: 'Lucas Thorne, Nadia K.',
+            plot: 'An underground courier must cross three borders before dawn with a decrypted satellite key.',
+            url: PUBLIC_STREAMS.mux,
+            gradient: 'from-orange-600 via-red-800 to-slate-950'
+          }
+        ];
+
+        const seriesCategories = [
+          { id: 'ser_scifi', name: 'Sci-Fi & Mystery' },
+          { id: 'ser_crime', name: 'Crime & Drama' },
+          { id: 'ser_doc', name: 'Docuseries' }
+        ];
+
+        const series = [
+          {
+            id: 'ser_1',
+            title: 'Signal Lost',
+            year: 2025,
+            rating: '8.8',
+            categoryId: 'ser_scifi',
+            genre: 'Sci-Fi, Mystery',
+            plot: 'A research outpost in the Arctic begins receiving broadcasts from fifty years in the future.',
+            gradient: 'from-indigo-600 via-blue-900 to-slate-950',
+            seasons: {
+              1: [
+                { id: 'ep_101', num: 1, title: 'The First Ping', duration: '46m', url: PUBLIC_STREAMS.mux, desc: 'Anomalous radio waves disrupt the station array.' },
+                { id: 'ep_102', num: 2, title: 'Ice Core', duration: '48m', url: PUBLIC_STREAMS.sintel, desc: 'The team decodes coordinates buried beneath the glacier.' },
+                { id: 'ep_103', num: 3, title: 'Static Horizon', duration: '51m', url: PUBLIC_STREAMS.bipbop, desc: 'A rescue chopper arrives with an unexpected passenger.' }
+              ],
+              2: [
+                { id: 'ep_201', num: 1, title: 'Echo Chamber', duration: '49m', url: PUBLIC_STREAMS.sintel, desc: 'Six months later, a second beacon activates.' },
+                { id: 'ep_202', num: 2, title: 'Zero Kelvin', duration: '52m', url: PUBLIC_STREAMS.mux, desc: 'Power reserves drop as the storm closes in.' }
+              ]
+            }
+          },
+          {
+            id: 'ser_2',
+            title: 'Harbor Precinct',
+            year: 2024,
+            rating: '8.3',
+            categoryId: 'ser_crime',
+            genre: 'Crime, Drama',
+            plot: 'Port authority detectives untangle a web of maritime smuggling and corporate cover-ups.',
+            gradient: 'from-rose-600 via-red-900 to-slate-950',
+            seasons: {
+              1: [
+                { id: 'ep_301', num: 1, title: 'Container 47', duration: '44m', url: PUBLIC_STREAMS.bipbop, desc: 'A routine dock inspection turns into a city-wide manhunt.' },
+                { id: 'ep_302', num: 2, title: 'Low Tide', duration: '45m', url: PUBLIC_STREAMS.mux, desc: 'Surveillance logs reveal an inside accomplice.' }
+              ]
+            }
+          },
+          {
+            id: 'ser_3',
+            title: 'Architects of Sound',
+            year: 2026,
+            rating: '9.0',
+            categoryId: 'ser_doc',
+            genre: 'Documentary, Music',
+            plot: 'Inside the studios of legendary sound designers and electronic pioneers.',
+            gradient: 'from-fuchsia-600 via-purple-900 to-slate-950',
+            seasons: {
+              1: [
+                { id: 'ep_401', num: 1, title: 'Analog Roots', duration: '40m', url: PUBLIC_STREAMS.sintel, desc: 'Tape loops, modular synths, and early cinema foley.' },
+                { id: 'ep_402', num: 2, title: 'Spatial Futures', duration: '42m', url: PUBLIC_STREAMS.mux, desc: 'Designing 3D audio for modern theaters and VR.' }
+              ]
+            }
+          }
+        ];
+
+        return { liveCategories, liveChannels, vodCategories, movies, seriesCategories, series };
+      }
+
+      // =========================================================
+      // APPLICATION STATE
+      // =========================================================
+      const saved = loadSavedState();
+      const defaultCatalog = buildDemoCatalog();
+
+      const state = {
+        profiles: saved?.profiles || [],
+        activeProfileId: saved?.activeProfileId || null,
+        view: 'login', // login | dashboard | live | movies | series | epg | multiscreen | catchup | settings
+        loginTab: 'xtream', // xtream | m3u | demo
+        catalog: defaultCatalog,
+        favorites: saved?.favorites || { live: ['ch_101'], movies: ['mov_1'], series: ['ser_1'] },
+        history: saved?.history || [],
+        watchedVod: saved?.watchedVod || {},
+        lockedCategories: saved?.lockedCategories || [],
+        unlockedSessionCats: {},
+        settings: Object.assign({
+          streamFormat: 'm3u8',
+          timeFormat: '12h',
+          epgOffsetHours: 0,
+          autoNextEpisode: true,
+          parentalPin: '0000',
+          corsProxy: '',
+          aspectRatio: 'contain'
+        }, saved?.settings || {}),
+        // UI Selections
+        liveState: {
+          selectedCatId: 'all',
+          search: '',
+          activeChannelId: 'ch_101',
+          isPlaying: false,
+          muted: false,
+          sleepMinutes: 0
+        },
+        moviesState: {
+          selectedCatId: 'all',
+          search: '',
+          sort: 'title'
+        },
+        seriesState: {
+          selectedCatId: 'all',
+          search: '',
+          sort: 'title',
+          episodeSort: 'ep_asc'
+        },
+        catchupState: {
+          selectedChannelId: 'ch_101',
+          selectedDayOffset: 0
+        },
+        multiState: {
+          layout: '2x2', // 2x2 | 1x2
+          activeAudioSlot: 0,
+          slots: ['ch_101', 'ch_201', 'ch_301', 'ch_401']
+        },
+        playerModal: {
+          open: false,
+          title: '',
+          subtitle: '',
+          url: '',
+          itemId: null,
+          itemType: null,
+          seriesId: null,
+          seasonNum: null,
+          episodeNum: null
+        },
+        statusMessage: null
+      };
+
+      // If user already had an active profile saved, boot straight to dashboard with demo/loaded catalog
+      if (state.activeProfileId && state.profiles.some(p => p.id === state.activeProfileId)) {
+        const activeP = state.profiles.find(p => p.id === state.activeProfileId);
+        if (activeP?.m3uCatalog) {
+          state.catalog = activeP.m3uCatalog;
+        }
+        state.view = 'dashboard';
+      }
+
+      // Active HLS instances map for cleanup
+      let mainHls = null;
+      let modalHls = null;
+      let multiHlsList = [];
+      let clockTimer = null;
+      let sleepTimerId = null;
+
+      // =========================================================
+      // UTILITIES
+      // =========================================================
+      function escapeHtml(str) {
+        return String(str ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
+      function showToast(msg, type = 'info') {
+        const container = document.getElementById('toast-container');
+        if (!container) return;
+        const colors = {
+          info: 'bg-surface-800 border-brand-500/40 text-slate-100',
+          success: 'bg-emerald-950/90 border-emerald-500/50 text-emerald-100',
+          error: 'bg-rose-950/90 border-rose-500/50 text-rose-100',
+          warn: 'bg-amber-950/90 border-amber-500/50 text-amber-100'
+        };
+        const el = document.createElement('div');
+        el.className = `pointer-events-auto px-4 py-3 rounded-xl border shadow-xl text-sm font-medium flex items-center gap-2 transition-all duration-300 ${colors[type] || colors.info}`;
+        el.textContent = msg;
+        container.appendChild(el);
+        setTimeout(() => {
+          el.classList.add('opacity-0', 'translate-y-2');
+          setTimeout(() => el.remove(), 300);
+        }, 3200);
+      }
+
+      function formatTime(ts) {
+        const d = new Date(ts + (state.settings.epgOffsetHours || 0) * 3600000);
+        return d.toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: state.settings.timeFormat === '12h'
+        });
+      }
+
+      function getCurrentProgram(ch) {
+        if (!ch || !ch.epg || !ch.epg.length) return { title: 'Live Broadcast', progress: 45, start: Date.now() - 1800000, end: Date.now() + 1800000, desc: 'Streaming live.' };
+        const now = Date.now();
+        const prog = ch.epg.find(p => now >= p.start && now <= p.end) || ch.epg[1] || ch.epg[0];
+        const total = Math.max(1, prog.end - prog.start);
+        const pct = Math.max(5, Math.min(100, Math.round(((now - prog.start) / total) * 100)));
+        return { ...prog, progress: pct };
+      }
+
+      function getNextProgram(ch) {
+        if (!ch || !ch.epg || ch.epg.length < 2) return null;
+        const now = Date.now();
+        return ch.epg.find(p => p.start > now) || ch.epg[ch.epg.length - 1];
+      }
+
+      function isFav(type, id) {
+        return (state.favorites[type] || []).includes(id);
+      }
+
+      function toggleFav(type, id) {
+        const arr = state.favorites[type] || [];
+        const idx = arr.indexOf(id);
+        if (idx >= 0) {
+          arr.splice(idx, 1);
+          showToast('Removed from Favorites', 'info');
+        } else {
+          arr.push(id);
+          showToast('Added to Favorites', 'success');
+        }
+        state.favorites[type] = arr;
+        persistState();
+      }
+
+      function addHistory(item) {
+        state.history = state.history.filter(h => !(h.id === item.id && h.type === item.type));
+        state.history.unshift({ ...item, watchedAt: Date.now() });
+        if (state.history.length > 30) state.history.length = 30;
+        persistState();
+      }
+
+      function activeProfile() {
+        return state.profiles.find(p => p.id === state.activeProfileId) || null;
+      }
+
+      // =========================================================
+      // M3U / M3U8 PARSER
+      // =========================================================
+      function parseM3U(text) {
+        const lines = text.split(/\r?\n/);
+        const channels = [];
+        const movies = [];
+        const liveCatMap = new Map();
+        const vodCatMap = new Map();
+        let currentInfo = null;
+        let idx = 1;
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          if (line.startsWith('#EXTINF:')) {
+            const groupMatch = line.match(/group-title="([^"]*)"/i);
+            const logoMatch = line.match(/tvg-logo="([^"]*)"/i);
+            const namePart = line.split(',').slice(1).join(',').trim() || `Stream ${idx}`;
+            const groupName = (groupMatch ? groupMatch[1].trim() : '') || 'General';
+            currentInfo = {
+              name: namePart,
+              group: groupName,
+              logo: logoMatch ? logoMatch[1] : ''
+            };
+          } else if (!line.startsWith('#') && /^https?:\/\//i.test(line)) {
+            const info = currentInfo || { name: `Channel ${idx}`, group: 'General', logo: '' };
+            const lowerUrl = line.toLowerCase();
+            const isVod = /\.(mp4|mkv|avi|mov)(\?|$)/i.test(lowerUrl) || /movie|vod/i.test(info.group);
+            if (isVod) {
+              const catId = 'vod_' + info.group.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+              if (!vodCatMap.has(catId)) vodCatMap.set(catId, { id: catId, name: info.group });
+              movies.push({
+                id: 'm3u_vod_' + idx,
+                title: info.name,
+                year: 2025,
+                rating: '8.0',
+                duration: 'VOD',
+                categoryId: catId,
+                genre: info.group,
+                director: 'Imported Playlist',
+                cast: 'N/A',
+                plot: `Imported from M3U playlist (${info.group}).`,
+                url: line,
+                gradient: 'from-sky-700 via-indigo-900 to-slate-950'
+              });
+            } else {
+              const catId = 'live_' + info.group.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+              if (!liveCatMap.has(catId)) liveCatMap.set(catId, { id: catId, name: info.group });
+              channels.push({
+                id: 'm3u_ch_' + idx,
+                num: idx,
+                name: info.name,
+                categoryId: catId,
+                url: line,
+                catchup: false,
+                color: '#0ea5e9',
+                badge: 'M3U',
+                epg: []
+              });
+            }
+            idx++;
+            currentInfo = null;
+          }
+        }
+
+        return {
+          liveCategories: Array.from(liveCatMap.values()),
+          liveChannels: channels,
+          vodCategories: Array.from(vodCatMap.values()),
+          movies,
+          seriesCategories: [],
+          series: []
+        };
+      }
+
+      // =========================================================
+      // XTREAM CODES API CLIENT (WITH CORS PROXY SUPPORT)
+      // =========================================================
+      const BACKGROUND_PROXIES = [
+        'https://corsproxy.io/?url=',
+        'https://api.allorigins.win/raw?url=',
+        'https://api.codetabs.com/v1/proxy?quest='
+      ];
+
+      function normalizeServerUrl(raw) {
+        let u = (raw || '').trim().replace(/\/+$/, '');
+        if (u && !/^https?:\/\//i.test(u)) u = 'http://' + u;
+        return u;
+      }
+
+      function buildProxiedUrl(proxyUrl, target) {
+        if (!proxyUrl) return target;
+        if (proxyUrl.includes('?') || proxyUrl.endsWith('=')) return `${proxyUrl}${encodeURIComponent(target)}`;
+        return `${proxyUrl.replace(/\/+$/, '')}/?url=${encodeURIComponent(target)}`;
+      }
+
+      async function fetchXtreamJson(serverUrl, username, password, action, proxyUrl) {
+        const cleanBase = normalizeServerUrl(serverUrl);
+        const target = `${cleanBase}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}${action ? '&action=' + encodeURIComponent(action) : ''}`;
+        if (window.AndroidBridge && typeof window.AndroidBridge.httpGet === 'function') {
+          const nativeText = window.AndroidBridge.httpGet(target);
+          if (!nativeText) throw new Error('Native HTTP request failed');
+          return JSON.parse(nativeText);
+        }
+        const finalUrl = buildProxiedUrl(proxyUrl, target);
+        const res = await fetch(finalUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        return JSON.parse(text);
+      }
+
+      async function fetchXtreamWithBackgroundProxy(serverUrl, username, password, preferredProxy) {
+        const normalized = normalizeServerUrl(serverUrl);
+        const candidates = [];
+        if (preferredProxy) candidates.push(preferredProxy);
+        if (/^https:\/\//i.test(normalized)) candidates.push('');
+        BACKGROUND_PROXIES.forEach(p => { if (!candidates.includes(p)) candidates.push(p); });
+        if (!candidates.includes('')) candidates.push('');
+
+        let lastErr = null;
+        for (const p of candidates) {
+          try {
+            const auth = await fetchXtreamJson(normalized, username, password, '', p);
+            if (auth && typeof auth === 'object') return { auth, workingProxy: p };
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        throw lastErr || new Error('Unable to reach server');
+      }
+
+      async function connectXtreamAccount(payload) {
+        const { name, username, password } = payload;
+        const serverUrl = normalizeServerUrl(payload.serverUrl);
+        const preferredProxy = (payload.proxyUrl || state.settings.corsProxy || '').trim();
+        if (!serverUrl || !username || !password) {
+          showToast('Please fill in Server URL, Username, and Password.', 'error');
+          return;
+        }
+
+        showToast('Connecting to Xtream server...', 'info');
+        try {
+          const { auth, workingProxy } = await fetchXtreamWithBackgroundProxy(serverUrl, username, password, preferredProxy);
+          const proxyUrl = workingProxy;
+          if (!auth || !auth.user_info || auth.user_info.auth === 0) {
+            showToast('Authentication failed. Check username or password.', 'error');
+            return;
+          }
+
+          const [liveCats, liveStreams, vodCats, vodStreams, serCats, serList] = await Promise.all([
+            fetchXtreamJson(serverUrl, username, password, 'get_live_categories', proxyUrl).catch(() => []),
+            fetchXtreamJson(serverUrl, username, password, 'get_live_streams', proxyUrl).catch(() => []),
+            fetchXtreamJson(serverUrl, username, password, 'get_vod_categories', proxyUrl).catch(() => []),
+            fetchXtreamJson(serverUrl, username, password, 'get_vod_streams', proxyUrl).catch(() => []),
+            fetchXtreamJson(serverUrl, username, password, 'get_series_categories', proxyUrl).catch(() => []),
+            fetchXtreamJson(serverUrl, username, password, 'get_series', proxyUrl).catch(() => [])
+          ]);
+
+          const cleanBase = serverUrl.replace(/\/+$/, '');
+          const ext = state.settings.streamFormat || 'm3u8';
+          const catalog = {
+            liveCategories: (liveCats || []).map(c => ({ id: String(c.category_id), name: c.category_name })),
+            liveChannels: (liveStreams || []).map((s, idx) => ({
+              id: 'xt_ch_' + s.stream_id,
+              num: s.num || idx + 1,
+              name: s.name || `Channel ${idx + 1}`,
+              categoryId: String(s.category_id),
+              url: `${cleanBase}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${s.stream_id}.${ext}`,
+              catchup: Boolean(s.tv_archive),
+              color: '#0ea5e9',
+              badge: ext.toUpperCase(),
+              epg: []
+            })),
+            vodCategories: (vodCats || []).map(c => ({ id: String(c.category_id), name: c.category_name })),
+            movies: (vodStreams || []).map(m => ({
+              id: 'xt_vod_' + m.stream_id,
+              title: m.name,
+              year: m.added ? new Date(Number(m.added) * 1000).getFullYear() : 2025,
+              rating: m.rating || '7.8',
+              duration: 'VOD',
+              categoryId: String(m.category_id),
+              genre: 'Movie',
+              director: 'Xtream VOD',
+              cast: '',
+              plot: m.name,
+              url: `${cleanBase}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${m.stream_id}.${m.container_extension || 'mp4'}`,
+              gradient: 'from-orange-600 via-red-800 to-slate-950'
+            })),
+            seriesCategories: (serCats || []).map(c => ({ id: String(c.category_id), name: c.category_name })),
+            series: (serList || []).map(sr => ({
+              id: 'xt_ser_' + sr.series_id,
+              xtreamSeriesId: sr.series_id,
+              title: sr.name,
+              year: sr.releaseDate ? sr.releaseDate.slice(0, 4) : 2025,
+              rating: sr.rating || '8.0',
+              categoryId: String(sr.category_id),
+              genre: sr.genre || 'Series',
+              plot: sr.plot || sr.name,
+              gradient: 'from-violet-700 via-purple-900 to-slate-950',
+              seasons: { 1: [] }
+            }))
+          };
+
+          const profile = {
+            id: 'prof_' + Date.now(),
+            name: name || username,
+            type: 'xtream',
+            serverUrl: cleanBase,
+            username,
+            password,
+            proxyUrl: proxyUrl || '',
+            expDate: auth.user_info.exp_date ? new Date(Number(auth.user_info.exp_date) * 1000).toLocaleDateString() : 'Unlimited',
+            status: auth.user_info.status || 'Active',
+            maxConn: auth.user_info.max_connections || '1',
+            activeConn: auth.user_info.active_cons || '0'
+          };
+
+          if (proxyUrl) state.settings.corsProxy = proxyUrl;
+          state.profiles.push(profile);
+          state.activeProfileId = profile.id;
+          state.catalog = catalog;
+          if (catalog.liveChannels.length) state.liveState.activeChannelId = catalog.liveChannels[0].id;
+          state.view = 'dashboard';
+          persistState();
+          showToast(`Connected as ${profile.name}!`, 'success');
+          render();
+        } catch (err) {
+          showToast(`Could not reach server (${err.message}). Check URL/credentials or try Demo Mode.`, 'error');
+        }
+      }
+
+      function activateDemoProfile() {
+        let demo = state.profiles.find(p => p.id === 'prof_demo');
+        if (!demo) {
+          demo = {
+            id: 'prof_demo',
+            name: 'Asmarter Demo Pro',
+            type: 'demo',
+            serverUrl: 'https://demo.asmarter-iptv.local',
+            username: 'avinash_pro',
+            expDate: 'Dec 31, 2027',
+            status: 'Active',
+            maxConn: '4',
+            activeConn: '1'
+          };
+          state.profiles.unshift(demo);
+        }
+        state.activeProfileId = demo.id;
+        state.catalog = buildDemoCatalog();
+        state.liveState.activeChannelId = state.catalog.liveChannels[0].id;
+        state.view = 'dashboard';
+        persistState();
+        showToast('Loaded Asmarter IPTV Demo Playlist', 'success');
+        render();
+      }
+
+      // =========================================================
+      // VIDEO / HLS PLAYER ENGINE
+      // =========================================================
+      function destroyHls(instance) {
+        if (instance) {
+          try { instance.destroy(); } catch (e) {}
+        }
+        return null;
+      }
+
+      function attachHlsToVideo(videoEl, url, onError) {
+        if (!videoEl || !url) return null;
+        if (window.Hls && Hls.isSupported() && /\.m3u8(\?|$)/i.test(url)) {
+          const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
+          hls.loadSource(url);
+          hls.attachMedia(videoEl);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            videoEl.play().catch(() => {});
+          });
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal && onError) onError(data.details || 'Stream playback error');
+          });
+          return hls;
+        } else {
+          videoEl.src = url;
+          videoEl.play().catch(() => {});
+          return null;
+        }
+      }
+
+      function startMainLivePlayer() {
+        const video = document.getElementById('live-video-el');
+        const errBox = document.getElementById('live-player-error');
+        if (!video) return;
+        const ch = state.catalog.liveChannels.find(c => c.id === state.liveState.activeChannelId) || state.catalog.liveChannels[0];
+        if (!ch) return;
+        mainHls = destroyHls(mainHls);
+        if (errBox) errBox.classList.add('hidden');
+        video.muted = state.liveState.muted;
+        mainHls = attachHlsToVideo(video, ch.url, (msg) => {
+          if (errBox) {
+            errBox.classList.remove('hidden');
+            const txt = errBox.querySelector('[data-err-msg]');
+            if (txt) txt.textContent = `Stream unavailable (${msg}). Try another channel or verify stream URL.`;
+          }
+        });
+        addHistory({ id: ch.id, type: 'live', title: ch.name, subtitle: getCurrentProgram(ch).title });
+      }
+
+      function startMultiPlayers() {
+        multiHlsList.forEach(h => destroyHls(h));
+        multiHlsList = [];
+        const count = state.multiState.layout === '2x2' ? 4 : 2;
+        for (let i = 0; i < count; i++) {
+          const video = document.getElementById(`multi-video-${i}`);
+          const chId = state.multiState.slots[i];
+          const ch = state.catalog.liveChannels.find(c => c.id === chId) || state.catalog.liveChannels[i % state.catalog.liveChannels.length];
+          if (video && ch) {
+            video.muted = i !== state.multiState.activeAudioSlot;
+            const hls = attachHlsToVideo(video, ch.url, () => {});
+            if (hls) multiHlsList.push(hls);
+          }
+        }
+      }
+
+      function cleanupAllPlayers() {
+        mainHls = destroyHls(mainHls);
+        modalHls = destroyHls(modalHls);
+        multiHlsList.forEach(h => destroyHls(h));
+        multiHlsList = [];
+      }
+
+      // =========================================================
+      // PARENTAL CONTROL & MODALS
+      // =========================================================
+      function openModal(html) {
+        const root = document.getElementById('modal-root');
+        if (!root) return;
+        root.innerHTML = html;
+        root.classList.remove('hidden');
+        root.classList.add('flex');
+      }
+
+      function closeModal() {
+        const root = document.getElementById('modal-root');
+        if (!root) return;
+        modalHls = destroyHls(modalHls);
+        root.classList.add('hidden');
+        root.classList.remove('flex');
+        root.innerHTML = '';
+      }
+
+      function requireCategoryPin(catId, onSuccess) {
+        if (!state.lockedCategories.includes(catId) || state.unlockedSessionCats[catId]) {
+          onSuccess();
+          return;
+        }
+        openModal(`
+          <div class="glass-card rounded-2xl max-w-sm w-full p-6 shadow-2xl">
+            <h3 class="text-lg font-bold text-white mb-1">Parental Control</h3>
+            <p class="text-sm text-slate-400 mb-4">Enter your 4-digit PIN to unlock this category (default: 0000).</p>
+            <input id="pin-check-input" type="password" maxlength="4" placeholder="••••" class="w-full px-4 py-3 rounded-xl bg-surface-950 border border-slate-700 text-center text-2xl tracking-[0.5em] text-white focus:outline-none focus:border-brand-400 mb-4" />
+            <div class="flex gap-2 justify-end">
+              <button type="button" id="pin-cancel-btn" class="px-4 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-sm font-medium text-slate-300">Cancel</button>
+              <button type="button" id="pin-submit-btn" class="px-4 py-2 rounded-xl bg-brand-500 hover:bg-brand-600 text-sm font-semibold text-white">Unlock</button>
+            </div>
+          </div>
+        `);
+        document.getElementById('pin-cancel-btn').onclick = closeModal;
+        document.getElementById('pin-submit-btn').onclick = () => {
+          const val = document.getElementById('pin-check-input').value;
+          if (val === state.settings.parentalPin) {
+            state.unlockedSessionCats[catId] = true;
+            closeModal();
+            onSuccess();
+          } else {
+            showToast('Incorrect PIN', 'error');
+          }
+        };
+      }
+
+      function openVodPlayerModal(opts) {
+        const { title, subtitle, url, itemId, itemType, seriesId, seasonNum, episodeNum } = opts;
+        addHistory({ id: itemId, type: itemType, title, subtitle });
+        state.watchedVod[itemId] = true;
+        persistState();
+        if (window.AndroidBridge && typeof window.AndroidBridge.playStream === 'function') {
+          window.AndroidBridge.playStream(url, title, subtitle || '');
+          return;
+        }
+
+        let nextEpBtnHtml = '';
+        if (itemType === 'series' && seriesId) {
+          const sr = state.catalog.series.find(s => s.id === seriesId);
+          const eps = sr?.seasons?.[seasonNum] || [];
+          const nextEp = eps.find(e => e.num === episodeNum + 1);
+          if (nextEp) {
+            nextEpBtnHtml = `<button type="button" id="modal-next-ep-btn" class="px-3 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs font-semibold text-white">Next: E${nextEp.num} ${escapeHtml(nextEp.title)}</button>`;
+          }
+        }
+
+        openModal(`
+          <div class="glass-card rounded-2xl max-w-4xl w-full overflow-hidden shadow-2xl border border-slate-700/80">
+            <div class="flex items-center justify-between px-5 py-3.5 bg-surface-900/90 border-b border-slate-800">
+              <div class="min-w-0">
+                <h3 class="text-base font-bold text-white truncate">${escapeHtml(title)}</h3>
+                <p class="text-xs text-slate-400 truncate">${escapeHtml(subtitle || '')}</p>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                ${nextEpBtnHtml}
+                <button type="button" id="modal-close-player" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-rose-600 text-xs font-semibold text-slate-200 transition">Close</button>
+              </div>
+            </div>
+            <div class="relative bg-black aspect-video w-full">
+              <video id="modal-video-el" class="w-full h-full object-contain" controls playsinline autoplay></video>
+            </div>
+          </div>
+        `);
+
+        document.getElementById('modal-close-player').onclick = closeModal;
+        const nextBtn = document.getElementById('modal-next-ep-btn');
+        if (nextBtn) {
+          nextBtn.onclick = () => {
+            const sr = state.catalog.series.find(s => s.id === seriesId);
+            const eps = sr?.seasons?.[seasonNum] || [];
+            const nextEp = eps.find(e => e.num === episodeNum + 1);
+            if (nextEp) {
+              openVodPlayerModal({
+                title: `${sr.title} — S${seasonNum}:E${nextEp.num} ${nextEp.title}`,
+                subtitle: nextEp.desc,
+                url: nextEp.url,
+                itemId: nextEp.id,
+                itemType: 'series',
+                seriesId,
+                seasonNum,
+                episodeNum: nextEp.num
+              });
+            }
+          };
+        }
+
+        const vid = document.getElementById('modal-video-el');
+        modalHls = destroyHls(modalHls);
+        modalHls = attachHlsToVideo(vid, url, (msg) => {
+          showToast(`Playback warning: ${msg}`, 'warn');
+        });
+      }
+
+      function openMovieDetailModal(movieId) {
+        const m = state.catalog.movies.find(x => x.id === movieId);
+        if (!m) return;
+        const fav = isFav('movies', m.id);
+        openModal(`
+          <div class="glass-card rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl">
+            <div class="p-6 flex flex-col sm:flex-row gap-6">
+              <div class="w-full sm:w-44 h-64 rounded-xl bg-gradient-to-br ${m.gradient} p-4 flex flex-col justify-between shrink-0 border border-white/10 shadow-lg">
+                <span class="self-end px-2 py-0.5 rounded bg-black/50 text-amber-400 text-xs font-bold">★ ${escapeHtml(m.rating)}</span>
+                <div>
+                  <p class="text-[11px] uppercase tracking-wider text-white/70">${escapeHtml(m.year)}</p>
+                  <p class="text-sm font-bold text-white leading-snug">${escapeHtml(m.title)}</p>
+                </div>
+              </div>
+              <div class="flex-1 min-w-0 flex flex-col justify-between">
+                <div>
+                  <div class="flex items-start justify-between gap-2">
+                    <h2 class="text-xl font-extrabold text-white">${escapeHtml(m.title)}</h2>
+                    <button type="button" id="md-close" class="text-slate-400 hover:text-white text-xl leading-none px-2">&times;</button>
+                  </div>
+                  <div class="flex flex-wrap gap-2 mt-2 text-xs text-slate-300">
+                    <span class="px-2 py-0.5 rounded bg-surface-800 border border-slate-700">${escapeHtml(m.year)}</span>
+                    <span class="px-2 py-0.5 rounded bg-surface-800 border border-slate-700">${escapeHtml(m.duration)}</span>
+                    <span class="px-2 py-0.5 rounded bg-surface-800 border border-slate-700">${escapeHtml(m.genre)}</span>
+                  </div>
+                  <p class="mt-4 text-sm text-slate-300 leading-relaxed">${escapeHtml(m.plot)}</p>
+                  <div class="mt-3 text-xs text-slate-400 space-y-1">
+                    <p><span class="text-slate-200 font-semibold">Director:</span> ${escapeHtml(m.director)}</p>
+                    <p><span class="text-slate-200 font-semibold">Cast:</span> ${escapeHtml(m.cast || 'N/A')}</p>
+                  </div>
+                </div>
+                <div class="mt-6 flex flex-wrap gap-3">
+                  <button type="button" id="md-play" class="px-5 py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-sm font-semibold text-white shadow-lg shadow-brand-500/25">▶ Play Movie</button>
+                  <button type="button" id="md-fav" class="px-4 py-2.5 rounded-xl bg-surface-800 hover:bg-surface-700 text-sm font-medium text-slate-200 border border-slate-700">
+                    ${fav ? '♥ Favorited' : '♡ Add Favorite'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        `);
+        document.getElementById('md-close').onclick = closeModal;
+        document.getElementById('md-play').onclick = () => {
+          openVodPlayerModal({ title: m.title, subtitle: `${m.year} • ${m.genre}`, url: m.url, itemId: m.id, itemType: 'movies' });
+        };
+        document.getElementById('md-fav').onclick = () => {
+          toggleFav('movies', m.id);
+          openMovieDetailModal(m.id);
+          render();
+        };
+      }
+
+      function parseDurationMinutes(dur) {
+        if (!dur) return 0;
+        const hMatch = String(dur).match(/(\d+)\s*h/i);
+        const mMatch = String(dur).match(/(\d+)\s*m/i);
+        const h = hMatch ? Number(hMatch[1]) * 60 : 0;
+        const m = mMatch ? Number(mMatch[1]) : (!hMatch ? (parseInt(dur, 10) || 0) : 0);
+        return h + m;
+      }
+
+      async function openSeriesDetailModal(seriesId, activeSeason = 1) {
+        const sr = state.catalog.series.find(x => x.id === seriesId);
+        if (!sr) return;
+        const prof = activeProfile();
+        if (sr.xtreamSeriesId && !sr.seasonsLoaded && prof && prof.type === 'xtream' && prof.password) {
+          showToast('Loading seasons & episodes...', 'info');
+          try {
+            const info = await fetchXtreamJson(prof.serverUrl, prof.username, prof.password, `get_series_info&series_id=${sr.xtreamSeriesId}`, prof.proxyUrl);
+            const epsObj = info && info.episodes ? info.episodes : {};
+            const parsedSeasons = {};
+            Object.keys(epsObj).forEach(sk => {
+              const sNum = Number(sk) || 1;
+              parsedSeasons[sNum] = (epsObj[sk] || []).map((ep, idx) => ({
+                id: 'xt_ep_' + ep.id,
+                num: Number(ep.episode_num) || (idx + 1),
+                title: ep.title || `Episode ${idx + 1}`,
+                duration: ep.info?.duration || '',
+                url: `${prof.serverUrl}/series/${encodeURIComponent(prof.username)}/${encodeURIComponent(prof.password)}/${ep.id}.${ep.container_extension || 'mp4'}`,
+                desc: ep.info?.plot || ''
+              }));
+            });
+            if (Object.keys(parsedSeasons).length) sr.seasons = parsedSeasons;
+            sr.seasonsLoaded = true;
+          } catch (e) {
+            showToast('Could not load episodes for this series.', 'warn');
+          }
+        }
+        const seasonKeys = Object.keys(sr.seasons || {}).map(Number).sort((a, b) => a - b);
+        const currentSeason = seasonKeys.includes(activeSeason) ? activeSeason : (seasonKeys[0] || 1);
+        const epSort = state.seriesState.episodeSort || 'ep_asc';
+        const episodes = [...(sr.seasons?.[currentSeason] || [])].sort((a, b) => {
+          if (epSort === 'ep_desc') return (Number(b.num) || 0) - (Number(a.num) || 0);
+          if (epSort === 'title_asc') return String(a.title || '').localeCompare(String(b.title || ''));
+          if (epSort === 'title_desc') return String(b.title || '').localeCompare(String(a.title || ''));
+          if (epSort === 'dur_asc') return parseDurationMinutes(a.duration) - parseDurationMinutes(b.duration);
+          if (epSort === 'dur_desc') return parseDurationMinutes(b.duration) - parseDurationMinutes(a.duration);
+          return (Number(a.num) || 0) - (Number(b.num) || 0);
+        });
+        const fav = isFav('series', sr.id);
+
+        openModal(`
+          <div class="glass-card rounded-2xl max-w-3xl w-full max-h-[88vh] flex flex-col overflow-hidden shadow-2xl">
+            <div class="p-6 border-b border-slate-800 flex flex-col sm:flex-row gap-5">
+              <div class="w-32 h-44 rounded-xl bg-gradient-to-br ${sr.gradient} p-3 flex flex-col justify-between shrink-0 border border-white/10">
+                <span class="self-end px-2 py-0.5 rounded bg-black/50 text-amber-400 text-xs font-bold">★ ${escapeHtml(sr.rating)}</span>
+                <p class="text-xs font-bold text-white">${escapeHtml(sr.title)}</p>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-start justify-between gap-2">
+                  <h2 class="text-xl font-extrabold text-white">${escapeHtml(sr.title)}</h2>
+                  <button type="button" id="sd-close" class="text-slate-400 hover:text-white text-xl leading-none px-2">&times;</button>
+                </div>
+                <p class="text-xs text-slate-400 mt-1">${escapeHtml(sr.year)} • ${escapeHtml(sr.genre)}</p>
+                <p class="text-sm text-slate-300 mt-3 leading-relaxed">${escapeHtml(sr.plot)}</p>
+                <div class="mt-4 flex flex-wrap items-center gap-2">
+                  <button type="button" id="sd-fav" class="px-3.5 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-xs font-semibold text-slate-200 border border-slate-700">
+                    ${fav ? '♥ Favorited' : '♡ Favorite Series'}
+                  </button>
+                  <div class="flex gap-1.5 ml-auto">
+                    ${seasonKeys.map(sk => `
+                      <button type="button" data-season="${sk}" class="sd-season-btn px-3 py-1.5 rounded-lg text-xs font-semibold ${sk === currentSeason ? 'bg-brand-500 text-white' : 'bg-surface-800 text-slate-300 hover:bg-surface-700'}">
+                        Season ${sk}
+                      </button>
+                    `).join('')}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="px-5 pt-3 pb-2 border-b border-slate-800/80 flex items-center justify-between gap-3 bg-surface-900/40">
+              <span class="text-xs font-bold uppercase tracking-wider text-slate-400">Season ${currentSeason} Episodes (${episodes.length})</span>
+              <select id="sd-ep-sort" class="px-3 py-1.5 rounded-lg bg-surface-950 border border-slate-700 text-xs font-semibold text-slate-200 focus:outline-none focus:border-brand-400">
+                <option value="ep_asc" ${epSort === 'ep_asc' ? 'selected' : ''}>Episode: 1 → N</option>
+                <option value="ep_desc" ${epSort === 'ep_desc' ? 'selected' : ''}>Episode: N → 1</option>
+                <option value="title_asc" ${epSort === 'title_asc' ? 'selected' : ''}>Title: A → Z</option>
+                <option value="title_desc" ${epSort === 'title_desc' ? 'selected' : ''}>Title: Z → A</option>
+                <option value="dur_asc" ${epSort === 'dur_asc' ? 'selected' : ''}>Duration: Shortest</option>
+                <option value="dur_desc" ${epSort === 'dur_desc' ? 'selected' : ''}>Duration: Longest</option>
+              </select>
+            </div>
+            <div class="p-5 overflow-y-auto space-y-2.5">
+              ${episodes.length ? episodes.map(ep => `
+                <div class="flex items-center justify-between gap-4 p-3.5 rounded-xl bg-surface-900/80 border border-slate-800 hover:border-brand-500/40 transition">
+                  <div class="min-w-0">
+                    <p class="text-sm font-semibold text-white">E${ep.num}. ${escapeHtml(ep.title)} <span class="text-xs font-normal text-slate-400 ml-2">${escapeHtml(ep.duration)}</span></p>
+                    <p class="text-xs text-slate-400 mt-0.5 line-clamp-1">${escapeHtml(ep.desc)}</p>
+                  </div>
+                  <button type="button" data-ep-id="${escapeHtml(ep.id)}" class="sd-play-ep px-4 py-2 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs font-semibold text-white shrink-0">▶ Play</button>
+                </div>
+              `).join('') : '<p class="text-sm text-slate-400">No episodes loaded for this season.</p>'}
+            </div>
+          </div>
+        `);
+
+        document.getElementById('sd-close').onclick = closeModal;
+        document.getElementById('sd-fav').onclick = () => {
+          toggleFav('series', sr.id);
+          openSeriesDetailModal(sr.id, currentSeason);
+          render();
+        };
+        const epSortSel = document.getElementById('sd-ep-sort');
+        if (epSortSel) {
+          epSortSel.onchange = (e) => {
+            state.seriesState.episodeSort = e.target.value;
+            openSeriesDetailModal(sr.id, currentSeason);
+          };
+        }
+        document.querySelectorAll('.sd-season-btn').forEach(btn => {
+          btn.onclick = () => openSeriesDetailModal(sr.id, Number(btn.dataset.season));
+        });
+        document.querySelectorAll('.sd-play-ep').forEach(btn => {
+          btn.onclick = () => {
+            const ep = episodes.find(e => e.id === btn.dataset.epId);
+            if (ep) {
+              openVodPlayerModal({
+                title: `${sr.title} — S${currentSeason}:E${ep.num} ${ep.title}`,
+                subtitle: ep.desc,
+                url: ep.url,
+                itemId: ep.id,
+                itemType: 'series',
+                seriesId: sr.id,
+                seasonNum: currentSeason,
+                episodeNum: ep.num
+              });
+            }
+          };
+        });
+      }
+
+      // =========================================================
+      // TOP HEADER BAR (SHARED ACROSS AUTHENTICATED VIEWS)
+      // =========================================================
+      function renderTopNav() {
+        const prof = activeProfile();
+        const nowStr = formatTime(Date.now());
+        const navItems = [
+          { id: 'dashboard', label: 'Home' },
+          { id: 'live', label: 'Live TV' },
+          { id: 'movies', label: 'Movies' },
+          { id: 'series', label: 'Series' },
+          { id: 'epg', label: 'TV Guide' },
+          { id: 'multiscreen', label: 'Multi-Screen' },
+          { id: 'catchup', label: 'Catch Up' },
+          { id: 'settings', label: 'Settings' }
+        ];
+        return `
+          <header class="sticky top-0 z-30 bg-surface-900/95 backdrop-blur-md border-b border-slate-800/90 px-4 py-3">
+            <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
+              <div class="flex items-center gap-3">
+                <button type="button" data-nav="dashboard" class="flex items-center gap-2.5 text-left group">
+                  <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-brand-400 to-blue-600 flex items-center justify-center shadow-lg shadow-brand-500/25">
+                    <svg class="w-5 h-5 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/></svg>
+                  </div>
+                  <div>
+                    <span class="font-extrabold text-base tracking-tight text-white group-hover:text-brand-400 transition">Asmarter <span class="text-brand-400">IPTV</span></span>
+                    <span class="block text-[11px] text-slate-400 leading-none">${escapeHtml(prof?.name || 'Guest')}</span>
+                  </div>
+                </button>
+              </div>
+
+              <nav class="flex items-center gap-1 overflow-x-auto py-1 max-w-full">
+                ${navItems.map(n => `
+                  <button type="button" data-nav="${n.id}" class="px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition ${state.view === n.id ? 'bg-brand-500 text-white shadow-sm' : 'text-slate-300 hover:bg-surface-800 hover:text-white'}">
+                    ${n.label}
+                  </button>
+                `).join('')}
+              </nav>
+
+              <div class="flex items-center gap-3">
+                <span id="live-clock" class="text-xs font-semibold text-slate-300 bg-surface-800 px-2.5 py-1.5 rounded-lg border border-slate-700/70">${escapeHtml(nowStr)}</span>
+                <button type="button" id="btn-switch-user" class="px-3 py-1.5 rounded-lg bg-surface-800 hover:bg-rose-600/80 text-xs font-semibold text-slate-200 border border-slate-700 transition">
+                  Switch User
+                </button>
+              </div>
+            </div>
+          </header>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: LOGIN / PLAYLIST MANAGER
+      // =========================================================
+      function renderLoginView() {
+        return `
+          <div class="min-h-screen flex items-center justify-center p-4 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-sky-900/30 via-surface-950 to-surface-950">
+            <div class="w-full max-w-4xl grid grid-cols-1 lg:grid-cols-5 gap-6">
+              <!-- Left Brand & Saved Profiles -->
+              <div class="lg:col-span-2 glass-card rounded-2xl p-6 flex flex-col justify-between">
+                <div>
+                  <div class="flex items-center gap-3 mb-4">
+                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-brand-400 to-blue-600 flex items-center justify-center shadow-lg shadow-brand-500/30">
+                      <svg class="w-6 h-6 text-white" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.348a1.125 1.125 0 010 1.971l-11.54 6.347a1.125 1.125 0 01-1.667-.985V5.653z"/></svg>
+                    </div>
+                    <div>
+                      <h1 class="text-xl font-extrabold text-white tracking-tight">Asmarter IPTV</h1>
+                      <p class="text-xs text-brand-400 font-medium">Smarters Pro Edition</p>
+                    </div>
+                  </div>
+                  <p class="text-xs text-slate-400 leading-relaxed mb-5">
+                    Stream Live TV, VOD Movies, Series, EPG TV Guide, Catch-Up, and 4-way Multi-Screen with Xtream Codes API or M3U playlists.
+                  </p>
+
+                  <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400 mb-2.5">Saved Profiles</h2>
+                  <div class="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    ${state.profiles.length ? state.profiles.map(p => `
+                      <div class="flex items-center justify-between gap-2 p-3 rounded-xl bg-surface-900/90 border border-slate-800 hover:border-brand-500/40">
+                        <button type="button" data-select-profile="${escapeHtml(p.id)}" class="flex-1 text-left min-w-0">
+                          <p class="text-sm font-semibold text-white truncate">${escapeHtml(p.name)}</p>
+                          <p class="text-[11px] text-slate-400 truncate">${escapeHtml(p.type.toUpperCase())} • ${escapeHtml(p.username || 'M3U')}</p>
+                        </button>
+                        <button type="button" data-del-profile="${escapeHtml(p.id)}" class="text-xs text-slate-400 hover:text-rose-400 px-2 py-1">Delete</button>
+                      </div>
+                    `).join('') : '<p class="text-xs text-slate-500 italic">No saved profiles yet.</p>'}
+                  </div>
+                </div>
+
+                <button type="button" id="btn-demo-quick" class="mt-6 w-full py-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-sm font-bold text-white shadow-lg shadow-emerald-500/20 transition">
+                  ▶ Launch Demo Playlist Now
+                </button>
+              </div>
+
+              <!-- Right Login Tabs -->
+              <div class="lg:col-span-3 glass-card rounded-2xl p-6">
+                <div class="flex gap-2 p-1 rounded-xl bg-surface-950 border border-slate-800 mb-6">
+                  <button type="button" data-login-tab="xtream" class="flex-1 py-2 rounded-lg text-xs font-semibold transition ${state.loginTab === 'xtream' ? 'bg-brand-500 text-white' : 'text-slate-400 hover:text-white'}">Xtream Codes API</button>
+                  <button type="button" data-login-tab="m3u" class="flex-1 py-2 rounded-lg text-xs font-semibold transition ${state.loginTab === 'm3u' ? 'bg-brand-500 text-white' : 'text-slate-400 hover:text-white'}">M3U URL / File</button>
+                </div>
+
+                ${state.loginTab === 'xtream' ? `
+                  <form id="xtream-login-form" class="space-y-4">
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-300 mb-1.5">Playlist / Profile Name</label>
+                      <input id="xt-name" type="text" placeholder="e.g. Home TV Pro" class="w-full px-3.5 py-2.5 rounded-xl bg-surface-950 border border-slate-700 text-sm text-white focus:outline-none focus:border-brand-400" />
+                    </div>
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-300 mb-1.5">Server URL (with port if any)</label>
+                      <input id="xt-server" type="text" placeholder="http://example-iptv.com:8080" required class="w-full px-3.5 py-2.5 rounded-xl bg-surface-950 border border-slate-700 text-sm text-white focus:outline-none focus:border-brand-400" />
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label class="block text-xs font-semibold text-slate-300 mb-1.5">Username</label>
+                        <input id="xt-user" type="text" placeholder="Username" required class="w-full px-3.5 py-2.5 rounded-xl bg-surface-950 border border-slate-700 text-sm text-white focus:outline-none focus:border-brand-400" />
+                      </div>
+                      <div>
+                        <label class="block text-xs font-semibold text-slate-300 mb-1.5">Password</label>
+                        <input id="xt-pass" type="password" placeholder="Password" required class="w-full px-3.5 py-2.5 rounded-xl bg-surface-950 border border-slate-700 text-sm text-white focus:outline-none focus:border-brand-400" />
+                      </div>
+                    </div>
+                    <button type="submit" class="w-full py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-sm font-bold text-white shadow-lg shadow-brand-500/25 transition">
+                      Add User & Connect
+                    </button>
+                  </form>
+                ` : `
+                  <form id="m3u-login-form" class="space-y-4">
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-300 mb-1.5">Playlist Name</label>
+                      <input id="m3u-name" type="text" placeholder="e.g. My M3U List" class="w-full px-3.5 py-2.5 rounded-xl bg-surface-950 border border-slate-700 text-sm text-white focus:outline-none focus:border-brand-400" />
+                    </div>
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-300 mb-1.5">M3U / M3U8 URL</label>
+                      <input id="m3u-url" type="url" placeholder="https://example.com/playlist.m3u8" class="w-full px-3.5 py-2.5 rounded-xl bg-surface-950 border border-slate-700 text-sm text-white focus:outline-none focus:border-brand-400" />
+                    </div>
+                    <div>
+                      <label class="block text-xs font-semibold text-slate-300 mb-1.5">Or Upload Local .m3u / .m3u8 File</label>
+                      <input id="m3u-file" type="file" accept=".m3u,.m3u8,.txt" class="w-full text-xs text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-surface-800 file:text-brand-400 hover:file:bg-surface-700" />
+                    </div>
+                    <button type="submit" class="w-full py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-sm font-bold text-white shadow-lg shadow-brand-500/25 transition">
+                      Load M3U Playlist
+                    </button>
+                  </form>
+                `}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: DASHBOARD (SMARTERS PRO HUB)
+      // =========================================================
+      function renderDashboardView() {
+        const prof = activeProfile();
+        const liveCount = state.catalog.liveChannels.length;
+        const vodCount = state.catalog.movies.length;
+        const serCount = state.catalog.series.length;
+
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+            <!-- Hero 3 Big Tiles -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+              <button type="button" data-nav="live" class="tile-live tile-hover rounded-2xl p-6 text-left relative overflow-hidden min-h-[180px] flex flex-col justify-between border border-white/15">
+                <div class="w-12 h-12 rounded-xl bg-white/15 flex items-center justify-center">
+                  <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M6 20.25h12m-7.5-3v3m3-3v3m-10.125-3h17.25c.621 0 1.125-.504 1.125-1.125V4.875c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125z"/></svg>
+                </div>
+                <div>
+                  <h2 class="text-2xl font-extrabold text-white tracking-tight">LIVE TV</h2>
+                  <p class="text-sm text-sky-100/90 mt-0.5">${liveCount} Channels • Live EPG</p>
+                </div>
+              </button>
+
+              <button type="button" data-nav="movies" class="tile-movies tile-hover rounded-2xl p-6 text-left relative overflow-hidden min-h-[180px] flex flex-col justify-between border border-white/15">
+                <div class="w-12 h-12 rounded-xl bg-white/15 flex items-center justify-center">
+                  <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.375 19.5h17.25m-17.25 0a1.125 1.125 0 01-1.125-1.125M3.375 19.5h1.5C5.496 19.5 6 18.996 6 18.375m-3.75 0V5.625m0 12.75v-1.5c0-.621.504-1.125 1.125-1.125m18.375 2.625V5.625m0 12.75c0 .621-.504 1.125-1.125 1.125m1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125m0 3.75h-1.5A1.125 1.125 0 0118 18.375M20.625 4.5H3.375m17.25 0c.621 0 1.125.504 1.125 1.125M20.625 4.5h-1.5C18.504 4.5 18 5.004 18 5.625m3.75 0v1.5c0 .621-.504 1.125-1.125 1.125M3.375 4.5c-.621 0-1.125.504-1.125 1.125M3.375 4.5h1.5C5.496 4.5 6 5.004 6 5.625m-3.75 0v1.5c0 .621.504 1.125 1.125 1.125m0 0h1.5m-1.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125m1.5-3.75C5.496 8.25 6 7.746 6 7.125v-1.5M4.875 8.25C5.496 8.25 6 8.754 6 9.375v1.5m0-5.25v5.25m0-5.25C6 5.004 6.504 4.5 7.125 4.5h9.75c.621 0 1.125.504 1.125 1.125m1.125 2.625h1.5m-1.5 0A1.125 1.125 0 0118 7.125v-1.5m1.125 2.625c-.621 0-1.125.504-1.125 1.125v1.5m2.625-2.625c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125M18 5.625v5.25M7.125 12h9.75m-9.75 0A1.125 1.125 0 016 10.875M7.125 12C6.504 12 6 12.504 6 13.125m0-2.25C6 11.496 5.496 12 4.875 12M18 10.875c0 .621-.504 1.125-1.125 1.125M18 10.875c0 .621.504 1.125 1.125 1.125m-2.25 0c.621 0 1.125.504 1.125 1.125m-12 5.25v-5.25m0 5.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125m-12 0v-1.5c0-.621-.504-1.125-1.125-1.125M18 18.375v-5.25m0 5.25v-1.5c0-.621.504-1.125 1.125-1.125M18 13.125v1.5c0 .621.504 1.125 1.125 1.125M18 13.125c0-.621.504-1.125 1.125-1.125M6 13.125v1.5c0 .621-.504 1.125-1.125 1.125M6 13.125C6 12.504 5.496 12 4.875 12m-1.5 0h1.5m-1.5 0c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125M19.125 12h1.5m0 0c.621 0 1.125.504 1.125 1.125v1.5c0 .621-.504 1.125-1.125 1.125m-17.25 0h1.5m14.25 0h1.5"/></svg>
+                </div>
+                <div>
+                  <h2 class="text-2xl font-extrabold text-white tracking-tight">MOVIES</h2>
+                  <p class="text-sm text-orange-100/90 mt-0.5">${vodCount} VOD Titles</p>
+                </div>
+              </button>
+
+              <button type="button" data-nav="series" class="tile-series tile-hover rounded-2xl p-6 text-left relative overflow-hidden min-h-[180px] flex flex-col justify-between border border-white/15">
+                <div class="w-12 h-12 rounded-xl bg-white/15 flex items-center justify-center">
+                  <svg class="w-7 h-7 text-white" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z"/></svg>
+                </div>
+                <div>
+                  <h2 class="text-2xl font-extrabold text-white tracking-tight">SERIES</h2>
+                  <p class="text-sm text-purple-100/90 mt-0.5">${serCount} Shows & Seasons</p>
+                </div>
+              </button>
+            </div>
+
+            <!-- Secondary Smarters Pro Tiles -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <button type="button" data-nav="epg" class="glass-card tile-hover rounded-2xl p-4 text-left flex items-center gap-3.5">
+                <div class="w-10 h-10 rounded-xl bg-brand-500/20 text-brand-400 flex items-center justify-center shrink-0 font-bold text-sm">EPG</div>
+                <div>
+                  <p class="text-sm font-bold text-white">Live TV Guide</p>
+                  <p class="text-xs text-slate-400">Timeline schedule</p>
+                </div>
+              </button>
+
+              <button type="button" data-nav="catchup" class="glass-card tile-hover rounded-2xl p-4 text-left flex items-center gap-3.5">
+                <div class="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 font-bold text-sm">↺</div>
+                <div>
+                  <p class="text-sm font-bold text-white">Catch Up</p>
+                  <p class="text-xs text-slate-400">Replay past shows</p>
+                </div>
+              </button>
+
+              <button type="button" data-nav="multiscreen" class="glass-card tile-hover rounded-2xl p-4 text-left flex items-center gap-3.5">
+                <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0 font-bold text-sm">⊞</div>
+                <div>
+                  <p class="text-sm font-bold text-white">Multi-Screen</p>
+                  <p class="text-xs text-slate-400">Up to 4 streams</p>
+                </div>
+              </button>
+
+              <button type="button" data-nav="settings" class="glass-card tile-hover rounded-2xl p-4 text-left flex items-center gap-3.5">
+                <div class="w-10 h-10 rounded-xl bg-slate-500/20 text-slate-300 flex items-center justify-center shrink-0 font-bold text-sm">⚙</div>
+                <div>
+                  <p class="text-sm font-bold text-white">Settings</p>
+                  <p class="text-xs text-slate-400">PIN, format & proxy</p>
+                </div>
+              </button>
+            </div>
+
+            <!-- Account Status & Recent Activity -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
+              <div class="glass-card rounded-2xl p-5">
+                <h3 class="text-sm font-bold text-white mb-3">Account Information</h3>
+                <div class="space-y-2.5 text-xs">
+                  <div class="flex justify-between py-1.5 border-b border-slate-800">
+                    <span class="text-slate-400">Username</span>
+                    <span class="font-semibold text-white">${escapeHtml(prof?.username || 'demo')}</span>
+                  </div>
+                  <div class="flex justify-between py-1.5 border-b border-slate-800">
+                    <span class="text-slate-400">Account Status</span>
+                    <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-semibold">${escapeHtml(prof?.status || 'Active')}</span>
+                  </div>
+                  <div class="flex justify-between py-1.5 border-b border-slate-800">
+                    <span class="text-slate-400">Expiration Date</span>
+                    <span class="font-semibold text-white">${escapeHtml(prof?.expDate || 'Unlimited')}</span>
+                  </div>
+                  <div class="flex justify-between py-1.5">
+                    <span class="text-slate-400">Connections</span>
+                    <span class="font-semibold text-white">${escapeHtml(prof?.activeConn || '1')} / ${escapeHtml(prof?.maxConn || '4')}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="lg:col-span-2 glass-card rounded-2xl p-5">
+                <div class="flex items-center justify-between mb-3">
+                  <h3 class="text-sm font-bold text-white">Recently Watched</h3>
+                  <span class="text-xs text-slate-400">${state.history.length} items</span>
+                </div>
+                ${state.history.length ? `
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-44 overflow-y-auto pr-1">
+                    ${state.history.slice(0, 6).map(h => `
+                      <button type="button" data-resume-type="${escapeHtml(h.type)}" data-resume-id="${escapeHtml(h.id)}" class="flex items-center justify-between p-3 rounded-xl bg-surface-900/90 border border-slate-800 hover:border-brand-500/40 text-left transition">
+                        <div class="min-w-0">
+                          <p class="text-xs font-bold text-white truncate">${escapeHtml(h.title)}</p>
+                          <p class="text-[11px] text-slate-400 truncate">${escapeHtml(h.subtitle || h.type.toUpperCase())}</p>
+                        </div>
+                        <span class="text-xs text-brand-400 font-semibold ml-2">▶</span>
+                      </button>
+                    `).join('')}
+                  </div>
+                ` : '<p class="text-xs text-slate-400 py-8 text-center">Start watching Live TV, Movies, or Series to see your recent history here.</p>'}
+              </div>
+            </div>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: LIVE TV (3-COLUMN SMARTERS PRO LAYOUT)
+      // =========================================================
+      function renderLiveView() {
+        const cats = [
+          { id: 'all', name: 'All Channels', count: state.catalog.liveChannels.length },
+          { id: 'fav', name: '★ Favorites', count: state.favorites.live.length },
+          ...state.catalog.liveCategories.map(c => ({
+            id: c.id,
+            name: c.name,
+            count: state.catalog.liveChannels.filter(ch => ch.categoryId === c.id).length
+          }))
+        ];
+
+        const q = state.liveState.search.trim().toLowerCase();
+        const filteredChannels = state.catalog.liveChannels.filter(ch => {
+          if (state.liveState.selectedCatId === 'fav' && !isFav('live', ch.id)) return false;
+          if (state.liveState.selectedCatId !== 'all' && state.liveState.selectedCatId !== 'fav' && ch.categoryId !== state.liveState.selectedCatId) return false;
+          if (q && !ch.name.toLowerCase().includes(q)) return false;
+          return true;
+        });
+
+        const activeCh = state.catalog.liveChannels.find(c => c.id === state.liveState.activeChannelId) || filteredChannels[0] || state.catalog.liveChannels[0];
+        const nowProg = getCurrentProgram(activeCh);
+        const nextProg = getNextProgram(activeCh);
+        const activeFav = activeCh ? isFav('live', activeCh.id) : false;
+
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-3 sm:p-4 grid grid-cols-1 lg:grid-cols-12 gap-4">
+            <!-- Categories -->
+            <aside class="lg:col-span-3 glass-card rounded-2xl p-3 flex flex-col max-h-[320px] lg:max-h-[calc(100vh-110px)]">
+              <div class="px-2 pb-2 border-b border-slate-800 mb-2 flex items-center justify-between">
+                <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400">Categories</h2>
+                <span class="text-[11px] text-slate-500">${cats.length}</span>
+              </div>
+              <div class="overflow-y-auto space-y-1 pr-1">
+                ${cats.map(c => {
+                  const locked = state.lockedCategories.includes(c.id) && !state.unlockedSessionCats[c.id];
+                  return `
+                    <button type="button" data-live-cat="${escapeHtml(c.id)}" class="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition ${state.liveState.selectedCatId === c.id ? 'bg-brand-500 text-white' : 'text-slate-300 hover:bg-surface-800'}">
+                      <span class="truncate">${locked ? '🔒 ' : ''}${escapeHtml(c.name)}</span>
+                      <span class="text-[11px] opacity-75 ml-2">${c.count}</span>
+                    </button>
+                  `;
+                }).join('')}
+              </div>
+            </aside>
+
+            <!-- Channel List -->
+            <section class="lg:col-span-4 glass-card rounded-2xl p-3 flex flex-col max-h-[380px] lg:max-h-[calc(100vh-110px)]">
+              <div class="mb-2.5">
+                <input id="live-search-input" type="search" value="${escapeHtml(state.liveState.search)}" placeholder="Search channels..." class="w-full px-3.5 py-2 rounded-xl bg-surface-950 border border-slate-700 text-xs text-white focus:outline-none focus:border-brand-400" />
+              </div>
+              <div class="overflow-y-auto space-y-1.5 pr-1 flex-1">
+                ${filteredChannels.length ? filteredChannels.map(ch => {
+                  const prog = getCurrentProgram(ch);
+                  const isActive = activeCh && activeCh.id === ch.id;
+                  const fav = isFav('live', ch.id);
+                  return `
+                    <div class="flex items-center gap-2 p-2.5 rounded-xl border transition cursor-pointer ${isActive ? 'bg-brand-500/20 border-brand-400/60' : 'bg-surface-900/80 border-slate-800 hover:border-slate-700'}" data-select-ch="${escapeHtml(ch.id)}">
+                      <div class="w-9 h-9 rounded-lg flex items-center justify-center font-extrabold text-xs text-white shrink-0" style="background:${escapeHtml(ch.color)}">
+                        ${escapeHtml(ch.num)}
+                      </div>
+                      <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-1.5">
+                          <p class="text-xs font-bold text-white truncate">${escapeHtml(ch.name)}</p>
+                          <span class="px-1.5 py-0.5 rounded bg-surface-800 text-[10px] font-bold text-brand-400">${escapeHtml(ch.badge)}</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400 truncate">${escapeHtml(prog.title)}</p>
+                        <div class="w-full h-1 bg-slate-800 rounded-full mt-1 overflow-hidden">
+                          <div class="h-full bg-brand-400" style="width:${prog.progress}%"></div>
+                        </div>
+                      </div>
+                      <button type="button" data-fav-ch="${escapeHtml(ch.id)}" class="p-1.5 rounded-lg hover:bg-surface-800 text-sm ${fav ? 'text-rose-400' : 'text-slate-500'}" title="Toggle Favorite">
+                        ${fav ? '♥' : '♡'}
+                      </button>
+                    </div>
+                  `;
+                }).join('') : '<p class="text-xs text-slate-400 text-center py-8">No channels match your filter.</p>'}
+              </div>
+            </section>
+
+            <!-- Live Player & EPG Details -->
+            <section class="lg:col-span-5 flex flex-col gap-4">
+              <div class="glass-card rounded-2xl overflow-hidden">
+                <div class="relative bg-black aspect-video w-full">
+                  <video id="live-video-el" class="w-full h-full object-${escapeHtml(state.settings.aspectRatio)}" controls playsinline></video>
+                  <div id="live-player-error" class="hidden absolute inset-0 bg-surface-950/90 flex flex-col items-center justify-center p-4 text-center">
+                    <p data-err-msg class="text-xs text-rose-300 mb-3">Stream unavailable.</p>
+                    <button type="button" id="btn-retry-live" class="px-4 py-2 rounded-lg bg-brand-500 text-xs font-semibold text-white">Retry Stream</button>
+                  </div>
+                </div>
+                <div class="p-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800">
+                  <div class="min-w-0">
+                    <h3 class="text-base font-extrabold text-white truncate">${escapeHtml(activeCh?.name || 'Select a Channel')}</h3>
+                    <p class="text-xs text-brand-400 truncate">Now: ${escapeHtml(nowProg.title)} (${formatTime(nowProg.start)} - ${formatTime(nowProg.end)})</p>
+                  </div>
+                  <div class="flex items-center gap-2">
+                    ${(window.AndroidBridge && activeCh) ? `<button type="button" id="btn-open-mx" class="px-2.5 py-1.5 rounded-lg bg-brand-500 hover:bg-brand-600 text-xs font-bold text-white">MX Player</button>` : ''}
+                    <button type="button" id="btn-ch-prev" class="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-xs font-semibold text-slate-200">◀ Prev</button>
+                    <button type="button" id="btn-ch-next" class="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-xs font-semibold text-slate-200">Next ▶</button>
+                    <button type="button" id="btn-aspect" class="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-xs font-semibold text-slate-200">Aspect: ${escapeHtml(state.settings.aspectRatio)}</button>
+                    ${activeCh ? `<button type="button" id="btn-active-fav" class="px-2.5 py-1.5 rounded-lg bg-surface-800 hover:bg-surface-700 text-xs font-semibold ${activeFav ? 'text-rose-400' : 'text-slate-300'}">${activeFav ? '♥' : '♡'}</button>` : ''}
+                  </div>
+                </div>
+              </div>
+
+              <!-- Now & Next EPG Card -->
+              <div class="glass-card rounded-2xl p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                  <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400">Program Info</h4>
+                  <button type="button" data-nav="epg" class="text-xs font-semibold text-brand-400 hover:underline">Open Full TV Guide →</button>
+                </div>
+                <div class="p-3 rounded-xl bg-surface-900/90 border border-slate-800">
+                  <p class="text-xs font-bold text-white">${escapeHtml(nowProg.title)}</p>
+                  <p class="text-[11px] text-slate-400 mt-1">${escapeHtml(nowProg.desc)}</p>
+                </div>
+                ${nextProg ? `
+                  <div class="flex items-center justify-between text-xs text-slate-400 px-1">
+                    <span>Up Next: <strong class="text-slate-200">${escapeHtml(nextProg.title)}</strong></span>
+                    <span>${formatTime(nextProg.start)}</span>
+                  </div>
+                ` : ''}
+              </div>
+            </section>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: MOVIES (VOD)
+      // =========================================================
+      function renderMoviesView() {
+        const cats = [
+          { id: 'all', name: 'All Movies' },
+          { id: 'fav', name: '★ Favorites' },
+          ...state.catalog.vodCategories
+        ];
+        const q = state.moviesState.search.trim().toLowerCase();
+        let list = state.catalog.movies.filter(m => {
+          if (state.moviesState.selectedCatId === 'fav' && !isFav('movies', m.id)) return false;
+          if (state.moviesState.selectedCatId !== 'all' && state.moviesState.selectedCatId !== 'fav' && m.categoryId !== state.moviesState.selectedCatId) return false;
+          if (q && !m.title.toLowerCase().includes(q) && !m.genre.toLowerCase().includes(q)) return false;
+          return true;
+        });
+        if (state.moviesState.sort === 'rating') list.sort((a, b) => Number(b.rating) - Number(a.rating));
+        else if (state.moviesState.sort === 'year') list.sort((a, b) => Number(b.year) - Number(a.year));
+        else list.sort((a, b) => a.title.localeCompare(b.title));
+
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <aside class="lg:col-span-3 glass-card rounded-2xl p-3 max-h-48 lg:max-h-[calc(100vh-110px)] overflow-y-auto space-y-1">
+              <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 pb-2 border-b border-slate-800 mb-2">Movie Categories</h2>
+              ${cats.map(c => `
+                <button type="button" data-vod-cat="${escapeHtml(c.id)}" class="w-full text-left px-3 py-2 rounded-xl text-xs font-semibold transition ${state.moviesState.selectedCatId === c.id ? 'bg-orange-500 text-white' : 'text-slate-300 hover:bg-surface-800'}">
+                  ${escapeHtml(c.name)}
+                </button>
+              `).join('')}
+            </aside>
+
+            <section id="vod-results-anchor" class="lg:col-span-9 space-y-4">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <input id="vod-search-input" type="search" value="${escapeHtml(state.moviesState.search)}" placeholder="Search movies or genres..." class="flex-1 min-w-[200px] px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-orange-400" />
+                <select id="vod-sort-select" class="px-3.5 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-xs font-semibold text-slate-200">
+                  <option value="title" ${state.moviesState.sort === 'title' ? 'selected' : ''}>Sort: A–Z</option>
+                  <option value="rating" ${state.moviesState.sort === 'rating' ? 'selected' : ''}>Sort: Top Rated</option>
+                  <option value="year" ${state.moviesState.sort === 'year' ? 'selected' : ''}>Sort: Newest</option>
+                </select>
+              </div>
+
+              <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                ${list.length ? list.map(m => `
+                  <div class="glass-card tile-hover rounded-2xl overflow-hidden flex flex-col cursor-pointer" data-open-movie="${escapeHtml(m.id)}">
+                    <div class="h-52 bg-gradient-to-br ${m.gradient} p-3 flex flex-col justify-between relative">
+                      <div class="flex justify-between items-start">
+                        <span class="px-2 py-0.5 rounded bg-black/60 text-amber-400 text-[11px] font-bold">★ ${escapeHtml(m.rating)}</span>
+                        ${state.watchedVod[m.id] ? '<span class="px-1.5 py-0.5 rounded bg-emerald-500/80 text-white text-[10px] font-bold">Watched</span>' : ''}
+                      </div>
+                      <div>
+                        <p class="text-[11px] text-white/75">${escapeHtml(m.year)} • ${escapeHtml(m.duration)}</p>
+                        <h3 class="text-sm font-extrabold text-white leading-snug line-clamp-2">${escapeHtml(m.title)}</h3>
+                      </div>
+                    </div>
+                    <div class="p-3 flex items-center justify-between text-xs">
+                      <span class="text-slate-400 truncate">${escapeHtml(m.genre)}</span>
+                      <span class="text-orange-400 font-semibold shrink-0 ml-2">Details →</span>
+                    </div>
+                  </div>
+                `).join('') : '<p class="col-span-full text-sm text-slate-400 py-12 text-center">No movies found.</p>'}
+              </div>
+            </section>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: SERIES
+      // =========================================================
+      function renderSeriesView() {
+        const cats = [
+          { id: 'all', name: 'All Series' },
+          { id: 'fav', name: '★ Favorites' },
+          ...state.catalog.seriesCategories
+        ];
+        const q = state.seriesState.search.trim().toLowerCase();
+        const list = state.catalog.series.filter(s => {
+          if (state.seriesState.selectedCatId === 'fav' && !isFav('series', s.id)) return false;
+          if (state.seriesState.selectedCatId !== 'all' && state.seriesState.selectedCatId !== 'fav' && s.categoryId !== state.seriesState.selectedCatId) return false;
+          if (q && !s.title.toLowerCase().includes(q)) return false;
+          return true;
+        });
+
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <aside class="lg:col-span-3 glass-card rounded-2xl p-3 max-h-48 lg:max-h-[calc(100vh-110px)] overflow-y-auto space-y-1">
+              <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 pb-2 border-b border-slate-800 mb-2">Series Categories</h2>
+              ${cats.map(c => `
+                <button type="button" data-ser-cat="${escapeHtml(c.id)}" class="w-full text-left px-3 py-2 rounded-xl text-xs font-semibold transition ${state.seriesState.selectedCatId === c.id ? 'bg-violet-600 text-white' : 'text-slate-300 hover:bg-surface-800'}">
+                  ${escapeHtml(c.name)}
+                </button>
+              `).join('')}
+            </aside>
+
+            <section id="ser-results-anchor" class="lg:col-span-9 space-y-4">
+              <input id="ser-search-input" type="search" value="${escapeHtml(state.seriesState.search)}" placeholder="Search series..." class="w-full px-4 py-2.5 rounded-xl bg-surface-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-violet-400" />
+              <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                ${list.length ? list.map(s => `
+                  <div class="glass-card tile-hover rounded-2xl overflow-hidden flex flex-col cursor-pointer" data-open-series="${escapeHtml(s.id)}">
+                    <div class="h-52 bg-gradient-to-br ${s.gradient} p-3 flex flex-col justify-between">
+                      <span class="self-start px-2 py-0.5 rounded bg-black/60 text-amber-400 text-[11px] font-bold">★ ${escapeHtml(s.rating)}</span>
+                      <div>
+                        <p class="text-[11px] text-white/75">${Object.keys(s.seasons || {}).length} Seasons</p>
+                        <h3 class="text-sm font-extrabold text-white leading-snug line-clamp-2">${escapeHtml(s.title)}</h3>
+                      </div>
+                    </div>
+                    <div class="p-3 flex items-center justify-between text-xs">
+                      <span class="text-slate-400 truncate">${escapeHtml(s.genre)}</span>
+                      <span class="text-violet-400 font-semibold shrink-0 ml-2">Episodes →</span>
+                    </div>
+                  </div>
+                `).join('') : '<p class="col-span-full text-sm text-slate-400 py-12 text-center">No series found.</p>'}
+              </div>
+            </section>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: EPG TV GUIDE
+      // =========================================================
+      function renderEpgView() {
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-4 space-y-4">
+            <div class="flex items-center justify-between">
+              <div>
+                <h1 class="text-lg font-extrabold text-white">Live EPG TV Guide</h1>
+                <p class="text-xs text-slate-400">Click any channel or live program to tune immediately.</p>
+              </div>
+            </div>
+            <div class="glass-card rounded-2xl overflow-x-auto">
+              <div class="min-w-[760px] divide-y divide-slate-800">
+                ${state.catalog.liveChannels.map(ch => `
+                  <div class="grid grid-cols-12 items-stretch">
+                    <button type="button" data-tune-epg="${escapeHtml(ch.id)}" class="col-span-3 p-3.5 bg-surface-900/90 hover:bg-surface-800 flex items-center gap-2.5 text-left border-r border-slate-800">
+                      <span class="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold text-white shrink-0" style="background:${escapeHtml(ch.color)}">${escapeHtml(ch.num)}</span>
+                      <span class="text-xs font-bold text-white truncate">${escapeHtml(ch.name)}</span>
+                    </button>
+                    <div class="col-span-9 grid grid-cols-4 divide-x divide-slate-800">
+                      ${(ch.epg.length ? ch.epg : [{ title: 'Live Broadcast', start: Date.now() - 1800000, end: Date.now() + 1800000 }]).map((prog, idx) => {
+                        const isNow = Date.now() >= prog.start && Date.now() <= prog.end;
+                        return `
+                          <button type="button" data-tune-epg="${escapeHtml(ch.id)}" class="p-3 text-left transition ${isNow ? 'bg-brand-500/15 hover:bg-brand-500/25' : 'hover:bg-surface-800/60'}">
+                            <p class="text-[10px] font-semibold ${isNow ? 'text-brand-400' : 'text-slate-500'}">${formatTime(prog.start)} – ${formatTime(prog.end)} ${isNow ? '• LIVE' : ''}</p>
+                            <p class="text-xs font-semibold text-white truncate mt-0.5">${escapeHtml(prog.title)}</p>
+                          </button>
+                        `;
+                      }).join('')}
+                    </div>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: MULTI-SCREEN (UP TO 4 STREAMS)
+      // =========================================================
+      function renderMultiScreenView() {
+        const count = state.multiState.layout === '2x2' ? 4 : 2;
+        const gridClass = state.multiState.layout === '2x2' ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1 md:grid-cols-2';
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-4 space-y-4">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 class="text-lg font-extrabold text-white">Multi-Screen Player</h1>
+                <p class="text-xs text-slate-400">Watch up to 4 live channels simultaneously. Click "Audio" on a tile to focus sound.</p>
+              </div>
+              <div class="flex gap-2">
+                <button type="button" data-multi-layout="1x2" class="px-3.5 py-2 rounded-xl text-xs font-semibold ${state.multiState.layout === '1x2' ? 'bg-brand-500 text-white' : 'bg-surface-800 text-slate-300'}">2 Screens</button>
+                <button type="button" data-multi-layout="2x2" class="px-3.5 py-2 rounded-xl text-xs font-semibold ${state.multiState.layout === '2x2' ? 'bg-brand-500 text-white' : 'bg-surface-800 text-slate-300'}">4 Screens (2×2)</button>
+              </div>
+            </div>
+
+            <div class="grid ${gridClass} gap-4">
+              ${Array.from({ length: count }).map((_, i) => {
+                const chId = state.multiState.slots[i];
+                const isAudio = state.multiState.activeAudioSlot === i;
+                return `
+                  <div class="glass-card rounded-2xl overflow-hidden border ${isAudio ? 'border-brand-400' : 'border-slate-800'}">
+                    <div class="relative bg-black aspect-video w-full">
+                      <video id="multi-video-${i}" class="w-full h-full object-contain" playsinline autoplay ${isAudio ? '' : 'muted'}></video>
+                    </div>
+                    <div class="p-3 flex items-center justify-between gap-2 bg-surface-900/90">
+                      <select data-multi-slot="${i}" class="flex-1 px-2.5 py-1.5 rounded-lg bg-surface-950 border border-slate-700 text-xs text-white">
+                        ${state.catalog.liveChannels.map(ch => `
+                          <option value="${escapeHtml(ch.id)}" ${ch.id === chId ? 'selected' : ''}>${escapeHtml(ch.num)}. ${escapeHtml(ch.name)}</option>
+                        `).join('')}
+                      </select>
+                      <button type="button" data-multi-audio="${i}" class="px-3 py-1.5 rounded-lg text-xs font-semibold ${isAudio ? 'bg-brand-500 text-white' : 'bg-surface-800 text-slate-300 hover:bg-surface-700'}">
+                        ${isAudio ? '🔊 Audio On' : '🔇 Muted'}
+                      </button>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: CATCH UP
+      // =========================================================
+      function renderCatchupView() {
+        const archiveChannels = state.catalog.liveChannels.filter(c => c.catchup);
+        const selCh = archiveChannels.find(c => c.id === state.catchupState.selectedChannelId) || archiveChannels[0];
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-7xl w-full mx-auto p-4 grid grid-cols-1 lg:grid-cols-12 gap-5">
+            <aside class="lg:col-span-4 glass-card rounded-2xl p-3 space-y-1.5 h-fit">
+              <h2 class="text-xs font-bold uppercase tracking-wider text-slate-400 px-2 pb-2 border-b border-slate-800 mb-2">Catch-Up Enabled Channels</h2>
+              ${archiveChannels.map(ch => `
+                <button type="button" data-cu-ch="${escapeHtml(ch.id)}" class="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition ${selCh?.id === ch.id ? 'bg-amber-500/20 border border-amber-400/50 text-white' : 'bg-surface-900/70 text-slate-300 hover:bg-surface-800'}">
+                  <span class="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold text-white shrink-0" style="background:${escapeHtml(ch.color)}">${escapeHtml(ch.num)}</span>
+                  <span class="text-xs font-bold truncate">${escapeHtml(ch.name)}</span>
+                </button>
+              `).join('')}
+            </aside>
+
+            <section class="lg:col-span-8 glass-card rounded-2xl p-5 space-y-4">
+              <div>
+                <h2 class="text-base font-extrabold text-white">${escapeHtml(selCh?.name || 'Catch Up')} — Archived Programs</h2>
+                <p class="text-xs text-slate-400">Select any past or current program to replay.</p>
+              </div>
+              <div class="space-y-2.5">
+                ${(selCh?.epg || []).map((prog, idx) => `
+                  <div class="flex items-center justify-between gap-4 p-3.5 rounded-xl bg-surface-900/90 border border-slate-800">
+                    <div class="min-w-0">
+                      <p class="text-[11px] font-semibold text-amber-400">${formatTime(prog.start)} – ${formatTime(prog.end)}</p>
+                      <p class="text-sm font-bold text-white truncate">${escapeHtml(prog.title)}</p>
+                      <p class="text-xs text-slate-400 truncate">${escapeHtml(prog.desc)}</p>
+                    </div>
+                    <button type="button" data-cu-play="${idx}" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-xs font-bold text-slate-950 shrink-0">↺ Replay</button>
+                  </div>
+                `).join('')}
+              </div>
+            </section>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // VIEW: SETTINGS & PARENTAL CONTROL
+      // =========================================================
+      function renderSettingsView() {
+        return `
+          ${renderTopNav()}
+          <main class="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 space-y-5">
+            <h1 class="text-xl font-extrabold text-white">Settings & Preferences</h1>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+              <!-- Stream & Player Settings -->
+              <div class="glass-card rounded-2xl p-5 space-y-4">
+                <h2 class="text-sm font-bold text-white border-b border-slate-800 pb-2">Stream & Player</h2>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-300 mb-1.5">Stream Format</label>
+                  <select id="set-format" class="w-full px-3 py-2 rounded-xl bg-surface-950 border border-slate-700 text-xs text-white">
+                    <option value="m3u8" ${state.settings.streamFormat === 'm3u8' ? 'selected' : ''}>HLS (.m3u8) — Recommended</option>
+                    <option value="ts" ${state.settings.streamFormat === 'ts' ? 'selected' : ''}>MPEG-TS (.ts)</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-300 mb-1.5">Time Format</label>
+                  <select id="set-time" class="w-full px-3 py-2 rounded-xl bg-surface-950 border border-slate-700 text-xs text-white">
+                    <option value="12h" ${state.settings.timeFormat === '12h' ? 'selected' : ''}>12-Hour (AM/PM)</option>
+                    <option value="24h" ${state.settings.timeFormat === '24h' ? 'selected' : ''}>24-Hour</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-300 mb-1.5">EPG Time Offset (Hours)</label>
+                  <input id="set-offset" type="number" min="-12" max="12" value="${state.settings.epgOffsetHours}" class="w-full px-3 py-2 rounded-xl bg-surface-950 border border-slate-700 text-xs text-white" />
+                </div>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-300 mb-1.5">CORS Proxy Worker URL</label>
+                  <input id="set-proxy" type="url" value="${escapeHtml(state.settings.corsProxy || '')}" placeholder="https://your-worker.workers.dev/?url=" class="w-full px-3 py-2 rounded-xl bg-surface-950 border border-slate-700 text-xs text-white" />
+                </div>
+                <button type="button" id="btn-save-settings" class="w-full py-2.5 rounded-xl bg-brand-500 hover:bg-brand-600 text-xs font-bold text-white">Save Stream Settings</button>
+              </div>
+
+              <!-- Parental Control & Maintenance -->
+              <div class="glass-card rounded-2xl p-5 space-y-4">
+                <h2 class="text-sm font-bold text-white border-b border-slate-800 pb-2">Parental Control</h2>
+                <div>
+                  <label class="block text-xs font-semibold text-slate-300 mb-1.5">4-Digit PIN (Current: ${escapeHtml(state.settings.parentalPin)})</label>
+                  <div class="flex gap-2">
+                    <input id="set-pin" type="password" maxlength="4" placeholder="New 4-digit PIN" class="flex-1 px-3 py-2 rounded-xl bg-surface-950 border border-slate-700 text-xs text-white" />
+                    <button type="button" id="btn-save-pin" class="px-4 py-2 rounded-xl bg-surface-800 hover:bg-surface-700 text-xs font-semibold text-white">Update PIN</button>
+                  </div>
+                </div>
+                <div>
+                  <p class="text-xs font-semibold text-slate-300 mb-2">Lock Live Categories</p>
+                  <div class="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                    ${state.catalog.liveCategories.map(c => {
+                      const isLocked = state.lockedCategories.includes(c.id);
+                      return `
+                        <label class="flex items-center justify-between p-2 rounded-lg bg-surface-900/80 text-xs cursor-pointer">
+                          <span class="text-slate-200">${escapeHtml(c.name)}</span>
+                          <input type="checkbox" data-lock-cat="${escapeHtml(c.id)}" ${isLocked ? 'checked' : ''} class="accent-brand-500" />
+                        </label>
+                      `;
+                    }).join('')}
+                  </div>
+                </div>
+                <div class="pt-2 border-t border-slate-800 flex gap-2">
+                  <button type="button" id="btn-clear-history" class="flex-1 py-2 rounded-xl bg-surface-800 hover:bg-rose-600/80 text-xs font-semibold text-slate-200 transition">Clear History</button>
+                  <button type="button" id="btn-speed-test" class="flex-1 py-2 rounded-xl bg-emerald-600/80 hover:bg-emerald-500 text-xs font-semibold text-white transition">Run Speed Check</button>
+                </div>
+              </div>
+            </div>
+          </main>
+        `;
+      }
+
+      // =========================================================
+      // RENDER & EVENT BINDING
+      // =========================================================
+      function render() {
+        cleanupAllPlayers();
+        const app = document.getElementById('app');
+        if (!app) return;
+
+        if (state.view === 'login') app.innerHTML = renderLoginView();
+        else if (state.view === 'dashboard') app.innerHTML = renderDashboardView();
+        else if (state.view === 'live') app.innerHTML = renderLiveView();
+        else if (state.view === 'movies') app.innerHTML = renderMoviesView();
+        else if (state.view === 'series') app.innerHTML = renderSeriesView();
+        else if (state.view === 'epg') app.innerHTML = renderEpgView();
+        else if (state.view === 'multiscreen') app.innerHTML = renderMultiScreenView();
+        else if (state.view === 'catchup') app.innerHTML = renderCatchupView();
+        else if (state.view === 'settings') app.innerHTML = renderSettingsView();
+
+        bindEvents();
+
+        if (state.view === 'live') startMainLivePlayer();
+        if (state.view === 'multiscreen') startMultiPlayers();
+      }
+
+      function bindEvents() {
+        // Navigation buttons
+        document.querySelectorAll('[data-nav]').forEach(btn => {
+          btn.onclick = () => {
+            state.view = btn.dataset.nav;
+            render();
+          };
+        });
+
+        const switchBtn = document.getElementById('btn-switch-user');
+        if (switchBtn) {
+          switchBtn.onclick = () => {
+            state.view = 'login';
+            render();
+          };
+        }
+
+        // Login View Events
+        document.querySelectorAll('[data-login-tab]').forEach(btn => {
+          btn.onclick = () => {
+            state.loginTab = btn.dataset.loginTab;
+            render();
+          };
+        });
+
+        const demoQuick = document.getElementById('btn-demo-quick');
+        if (demoQuick) demoQuick.onclick = activateDemoProfile;
+
+        document.querySelectorAll('[data-select-profile]').forEach(btn => {
+          btn.onclick = () => {
+            const p = state.profiles.find(x => x.id === btn.dataset.selectProfile);
+            if (!p) return;
+            state.activeProfileId = p.id;
+            if (p.type === 'demo') state.catalog = buildDemoCatalog();
+            else if (p.m3uCatalog) state.catalog = p.m3uCatalog;
+            state.view = 'dashboard';
+            persistState();
+            render();
+          };
+        });
+
+        document.querySelectorAll('[data-del-profile]').forEach(btn => {
+          btn.onclick = () => {
+            state.profiles = state.profiles.filter(x => x.id !== btn.dataset.delProfile);
+            if (state.activeProfileId === btn.dataset.delProfile) state.activeProfileId = null;
+            persistState();
+            showToast('Profile deleted', 'info');
+            render();
+          };
+        });
+
+        const xtForm = document.getElementById('xtream-login-form');
+        if (xtForm) {
+          xtForm.onsubmit = (e) => {
+            e.preventDefault();
+            connectXtreamAccount({
+              name: document.getElementById('xt-name').value.trim(),
+              serverUrl: document.getElementById('xt-server').value.trim(),
+              username: document.getElementById('xt-user').value.trim(),
+              password: document.getElementById('xt-pass').value.trim(),
+              proxyUrl: state.settings.corsProxy || ''
+            });
+          };
+        }
+
+        const m3uForm = document.getElementById('m3u-login-form');
+        if (m3uForm) {
+          m3uForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('m3u-name').value.trim() || 'M3U Playlist';
+            const urlVal = document.getElementById('m3u-url').value.trim();
+            const fileInput = document.getElementById('m3u-file');
+            try {
+              let rawText = '';
+              if (fileInput?.files?.length) {
+                rawText = await fileInput.files[0].text();
+              } else if (urlVal) {
+                const res = await fetch(urlVal);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                rawText = await res.text();
+              } else {
+                showToast('Provide an M3U URL or upload a local .m3u file.', 'error');
+                return;
+              }
+              const parsed = parseM3U(rawText);
+              if (!parsed.liveChannels.length && !parsed.movies.length) {
+                showToast('No playable streams found in M3U.', 'error');
+                return;
+              }
+              const prof = {
+                id: 'prof_' + Date.now(),
+                name,
+                type: 'm3u',
+                username: 'M3U User',
+                expDate: 'Unlimited',
+                status: 'Active',
+                maxConn: '1',
+                activeConn: '1',
+                m3uCatalog: parsed
+              };
+              state.profiles.push(prof);
+              state.activeProfileId = prof.id;
+              state.catalog = parsed;
+              if (parsed.liveChannels.length) state.liveState.activeChannelId = parsed.liveChannels[0].id;
+              state.view = 'dashboard';
+              persistState();
+              showToast(`Loaded ${parsed.liveChannels.length} channels & ${parsed.movies.length} VODs`, 'success');
+              render();
+            } catch (err) {
+              showToast(`Failed to load M3U (${err.message})`, 'error');
+            }
+          };
+        }
+
+        // Dashboard Recent Resume
+        document.querySelectorAll('[data-resume-id]').forEach(btn => {
+          btn.onclick = () => {
+            const type = btn.dataset.resumeType;
+            const id = btn.dataset.resumeId;
+            if (type === 'live') {
+              state.liveState.activeChannelId = id;
+              state.view = 'live';
+              render();
+            } else if (type === 'movies') {
+              openMovieDetailModal(id);
+            } else if (type === 'series') {
+              state.view = 'series';
+              render();
+            }
+          };
+        });
+
+        // Live TV Events
+        document.querySelectorAll('[data-live-cat]').forEach(btn => {
+          btn.onclick = () => {
+            const catId = btn.dataset.liveCat;
+            requireCategoryPin(catId, () => {
+              state.liveState.selectedCatId = catId;
+              render();
+            });
+          };
+        });
+
+        const liveSearch = document.getElementById('live-search-input');
+        if (liveSearch) {
+          liveSearch.oninput = (e) => {
+            state.liveState.search = e.target.value;
+            render();
+            const el = document.getElementById('live-search-input');
+            if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+          };
+        }
+
+        document.querySelectorAll('[data-select-ch]').forEach(el => {
+          el.onclick = (e) => {
+            if (e.target.closest('[data-fav-ch]')) return;
+            state.liveState.activeChannelId = el.dataset.selectCh;
+            render();
+          };
+        });
+
+        document.querySelectorAll('[data-fav-ch]').forEach(btn => {
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            toggleFav('live', btn.dataset.favCh);
+            render();
+          };
+        });
+
+        const btnPrev = document.getElementById('btn-ch-prev');
+        const btnNext = document.getElementById('btn-ch-next');
+        if (btnPrev && btnNext) {
+          const chs = state.catalog.liveChannels;
+          const idx = chs.findIndex(c => c.id === state.liveState.activeChannelId);
+          btnPrev.onclick = () => {
+            if (!chs.length) return;
+            state.liveState.activeChannelId = chs[(idx - 1 + chs.length) % chs.length].id;
+            render();
+          };
+          btnNext.onclick = () => {
+            if (!chs.length) return;
+            state.liveState.activeChannelId = chs[(idx + 1) % chs.length].id;
+            render();
+          };
+        }
+
+        const btnAspect = document.getElementById('btn-aspect');
+        if (btnAspect) {
+          btnAspect.onclick = () => {
+            const modes = ['contain', 'cover', 'fill'];
+            const next = modes[(modes.indexOf(state.settings.aspectRatio) + 1) % modes.length];
+            state.settings.aspectRatio = next;
+            persistState();
+            render();
+          };
+        }
+
+        const btnActiveFav = document.getElementById('btn-active-fav');
+        if (btnActiveFav) {
+          btnActiveFav.onclick = () => {
+            toggleFav('live', state.liveState.activeChannelId);
+            render();
+          };
+        }
+
+        const btnRetryLive = document.getElementById('btn-retry-live');
+        if (btnRetryLive) btnRetryLive.onclick = startMainLivePlayer;
+
+        const btnOpenMx = document.getElementById('btn-open-mx');
+        if (btnOpenMx) {
+          btnOpenMx.onclick = () => {
+            const ch = state.catalog.liveChannels.find(c => c.id === state.liveState.activeChannelId);
+            if (ch && window.AndroidBridge && typeof window.AndroidBridge.playStream === 'function') {
+              window.AndroidBridge.playStream(ch.url, ch.name, getCurrentProgram(ch).title);
+            }
+          };
+        }
+
+        // Movies Events
+        document.querySelectorAll('[data-vod-cat]').forEach(btn => {
+          btn.onclick = () => {
+            state.moviesState.selectedCatId = btn.dataset.vodCat;
+            render();
+            const el = document.getElementById('vod-results-anchor');
+            if (el && window.innerWidth < 1024) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          };
+        });
+        const vodSearch = document.getElementById('vod-search-input');
+        if (vodSearch) {
+          vodSearch.oninput = (e) => {
+            state.moviesState.search = e.target.value;
+            render();
+            const el = document.getElementById('vod-search-input');
+            if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+          };
+        }
+        const vodSort = document.getElementById('vod-sort-select');
+        if (vodSort) {
+          vodSort.onchange = (e) => {
+            state.moviesState.sort = e.target.value;
+            render();
+          };
+        }
+        document.querySelectorAll('[data-open-movie]').forEach(card => {
+          card.onclick = () => openMovieDetailModal(card.dataset.openMovie);
+        });
+
+        // Series Events
+        document.querySelectorAll('[data-ser-cat]').forEach(btn => {
+          btn.onclick = () => {
+            state.seriesState.selectedCatId = btn.dataset.serCat;
+            render();
+            const el = document.getElementById('ser-results-anchor');
+            if (el && window.innerWidth < 1024) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          };
+        });
+        const serSearch = document.getElementById('ser-search-input');
+        if (serSearch) {
+          serSearch.oninput = (e) => {
+            state.seriesState.search = e.target.value;
+            render();
+            const el = document.getElementById('ser-search-input');
+            if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+          };
+        }
+        document.querySelectorAll('[data-open-series]').forEach(card => {
+          card.onclick = () => openSeriesDetailModal(card.dataset.openSeries);
+        });
+
+        // EPG Events
+        document.querySelectorAll('[data-tune-epg]').forEach(btn => {
+          btn.onclick = () => {
+            state.liveState.activeChannelId = btn.dataset.tuneEpg;
+            state.view = 'live';
+            render();
+          };
+        });
+
+        // Multi-Screen Events
+        document.querySelectorAll('[data-multi-layout]').forEach(btn => {
+          btn.onclick = () => {
+            state.multiState.layout = btn.dataset.multiLayout;
+            render();
+          };
+        });
+        document.querySelectorAll('[data-multi-slot]').forEach(sel => {
+          sel.onchange = (e) => {
+            state.multiState.slots[Number(sel.dataset.multiSlot)] = e.target.value;
+            render();
+          };
+        });
+        document.querySelectorAll('[data-multi-audio]').forEach(btn => {
+          btn.onclick = () => {
+            state.multiState.activeAudioSlot = Number(btn.dataset.multiAudio);
+            for (let i = 0; i < 4; i++) {
+              const v = document.getElementById(`multi-video-${i}`);
+              if (v) v.muted = i !== state.multiState.activeAudioSlot;
+            }
+            render();
+          };
+        });
+
+        // Catch-Up Events
+        document.querySelectorAll('[data-cu-ch]').forEach(btn => {
+          btn.onclick = () => {
+            state.catchupState.selectedChannelId = btn.dataset.cuCh;
+            render();
+          };
+        });
+        document.querySelectorAll('[data-cu-play]').forEach(btn => {
+          btn.onclick = () => {
+            const archiveChannels = state.catalog.liveChannels.filter(c => c.catchup);
+            const ch = archiveChannels.find(c => c.id === state.catchupState.selectedChannelId) || archiveChannels[0];
+            const prog = ch?.epg?.[Number(btn.dataset.cuPlay)];
+            if (ch && prog) {
+              openVodPlayerModal({
+                title: `${ch.name} — ${prog.title}`,
+                subtitle: `Catch-Up Replay (${formatTime(prog.start)} - ${formatTime(prog.end)})`,
+                url: ch.url,
+                itemId: ch.id + '_cu_' + btn.dataset.cuPlay,
+                itemType: 'live'
+              });
+            }
+          };
+        });
+
+        // Settings Events
+        const saveSetBtn = document.getElementById('btn-save-settings');
+        if (saveSetBtn) {
+          saveSetBtn.onclick = () => {
+            state.settings.streamFormat = document.getElementById('set-format').value;
+            state.settings.timeFormat = document.getElementById('set-time').value;
+            state.settings.epgOffsetHours = Number(document.getElementById('set-offset').value) || 0;
+            state.settings.corsProxy = document.getElementById('set-proxy').value.trim();
+            persistState();
+            showToast('Settings saved', 'success');
+            render();
+          };
+        }
+
+        const savePinBtn = document.getElementById('btn-save-pin');
+        if (savePinBtn) {
+          savePinBtn.onclick = () => {
+            const p = document.getElementById('set-pin').value.trim();
+            if (!/^\d{4}$/.test(p)) {
+              showToast('PIN must be exactly 4 digits', 'error');
+              return;
+            }
+            state.settings.parentalPin = p;
+            persistState();
+            showToast('Parental PIN updated', 'success');
+            render();
+          };
+        }
+
+        document.querySelectorAll('[data-lock-cat]').forEach(chk => {
+          chk.onchange = (e) => {
+            const id = chk.dataset.lockCat;
+            if (e.target.checked) {
+              if (!state.lockedCategories.includes(id)) state.lockedCategories.push(id);
+            } else {
+              state.lockedCategories = state.lockedCategories.filter(x => x !== id);
+            }
+            persistState();
+            showToast('Category lock updated', 'info');
+          };
+        });
+
+        const clearHistBtn = document.getElementById('btn-clear-history');
+        if (clearHistBtn) {
+          clearHistBtn.onclick = () => {
+            state.history = [];
+            state.watchedVod = {};
+            persistState();
+            showToast('Watch history cleared', 'info');
+          };
+        }
+
+        const speedBtn = document.getElementById('btn-speed-test');
+        if (speedBtn) {
+          speedBtn.onclick = async () => {
+            showToast('Testing stream server latency...', 'info');
+            const t0 = performance.now();
+            try {
+              await fetch(PUBLIC_STREAMS.mux, { method: 'HEAD', mode: 'cors' });
+              const ms = Math.round(performance.now() - t0);
+              showToast(`Stream CDN latency: ${ms} ms (Healthy)`, 'success');
+            } catch (e) {
+              showToast('Speed check completed (check network/CORS)', 'warn');
+            }
+          };
+        }
+      }
+
+      // Clock ticker
+      if (clockTimer) clearInterval(clockTimer);
+      clockTimer = setInterval(() => {
+        const el = document.getElementById('live-clock');
+        if (el) el.textContent = formatTime(Date.now());
+      }, 15000);
+
+      // Initial render
+      render();
+    })();
+  </script>
+</body>
+</html>
